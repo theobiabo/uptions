@@ -1,32 +1,26 @@
-mod error;
-mod services;
-mod dtos;
-pub mod utils;
 mod app;
-mod integrations;
+mod config;
+mod error;
+mod polymarket;
 
-use axum::{Router, routing::get};
 use tokio::net::TcpListener;
 
-const ADDRESS: &str = "0.0.0.0:3000";
-
-async fn health_check() -> &'static str {
-    "Uptions endpoint is running"
-}
-
-fn create_app() -> Router {
-    Router::new().route("/", get(health_check))
-}
+use crate::{app::create_app, app::state::AppState, config::AppConfig};
 
 #[tokio::main]
 async fn main() {
-    let app = create_app();
+    dotenvy::dotenv().ok();
 
-    let listener = TcpListener::bind(ADDRESS)
+    let config = AppConfig::from_env();
+    let address = config.server_address.clone();
+    let state = AppState::new(config);
+    let app = create_app(state);
+
+    let listener = TcpListener::bind(&address)
         .await
         .expect("failed to bind listener");
 
-    println!("Application is running on {}", ADDRESS);
+    println!("Application is running on {}", address);
 
     axum::serve(listener, app).await.expect("failed to serve");
 }
