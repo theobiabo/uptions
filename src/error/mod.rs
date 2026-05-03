@@ -7,22 +7,22 @@ use serde_json::json;
 
 #[derive(Debug, thiserror::Error)]
 pub enum AppError {
+    #[error("Unauthorized")]
+    Unauthorized,
+
+    #[error("{0}")]
+    BadRequest(String),
+
     #[error("{0}")]
     ExternalApiError(String),
-
-    #[error("Configuration error: {0}")]
-    ConfigurationError(String),
-
-    #[error("Internal server error")]
-    InternalServerError,
 }
 
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         let status = match self {
+            AppError::Unauthorized => StatusCode::UNAUTHORIZED,
+            AppError::BadRequest(_) => StatusCode::BAD_REQUEST,
             AppError::ExternalApiError(_) => StatusCode::BAD_GATEWAY,
-            AppError::ConfigurationError(_) => StatusCode::INTERNAL_SERVER_ERROR,
-            AppError::InternalServerError => StatusCode::INTERNAL_SERVER_ERROR,
         };
 
         let body = Json(json!({

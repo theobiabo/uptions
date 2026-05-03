@@ -38,16 +38,16 @@ fn build_openapi_document() -> Value {
         "info": {
             "title": "Uptions Backend API",
             "version": "1.0.0",
-            "description": "Backend endpoints for Polymarket authentication and market discovery."
+            "description": "Versioned V1 backend endpoints for wallet authentication and Polymarket market discovery."
         },
         "servers": [
             {
-                "url": "http://localhost:3000",
+                "url": "http://localhost:3000/api/v1",
                 "description": "Local development"
             }
         ],
         "paths": {
-            "/": {
+            "/health": {
                 "get": {
                     "tags": ["Health"],
                     "summary": "Health check",
@@ -66,27 +66,37 @@ fn build_openapi_document() -> Value {
                     }
                 }
             },
-            "/polymarket/auth": {
+            "/auth/challenge": {
                 "post": {
-                    "tags": ["Polymarket"],
-                    "summary": "Create or derive Polymarket API credentials",
+                    "tags": ["Auth"],
+                    "summary": "Create a wallet sign-in challenge",
                     "requestBody": {
                         "required": true,
                         "content": {
                             "application/json": {
                                 "schema": {
-                                    "$ref": "#/components/schemas/PolymarketAuthRequest"
+                                    "$ref": "#/components/schemas/CreateChallengeRequest"
                                 }
                             }
                         }
                     },
                     "responses": {
                         "200": {
-                            "description": "Polymarket credentials created or derived successfully",
+                            "description": "Challenge created successfully",
                             "content": {
                                 "application/json": {
                                     "schema": {
-                                        "$ref": "#/components/schemas/PolymarketAuthResponse"
+                                        "$ref": "#/components/schemas/CreateChallengeResponse"
+                                    }
+                                }
+                            }
+                        },
+                        "400": {
+                            "description": "Invalid wallet address",
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "$ref": "#/components/schemas/ErrorResponse"
                                     }
                                 }
                             }
@@ -101,8 +111,79 @@ fn build_openapi_document() -> Value {
                                 }
                             }
                         },
-                        "502": {
-                            "description": "Upstream Polymarket error",
+                    }
+                }
+            },
+            "/auth/verify": {
+                "post": {
+                    "tags": ["Auth"],
+                    "summary": "Verify a signed wallet challenge",
+                    "requestBody": {
+                        "required": true,
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/VerifyChallengeRequest"
+                                }
+                            }
+                        }
+                    },
+                    "responses": {
+                        "200": {
+                            "description": "Wallet verified and session issued",
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "$ref": "#/components/schemas/VerifyChallengeResponse"
+                                    }
+                                }
+                            }
+                        },
+                        "400": {
+                            "description": "Invalid or expired challenge",
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "$ref": "#/components/schemas/ErrorResponse"
+                                    }
+                                }
+                            }
+                        },
+                        "401": {
+                            "description": "Invalid signature",
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "$ref": "#/components/schemas/ErrorResponse"
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            "/auth/me": {
+                "get": {
+                    "tags": ["Auth"],
+                    "summary": "Get the current authenticated user",
+                    "security": [
+                        {
+                            "bearerAuth": []
+                        }
+                    ],
+                    "responses": {
+                        "200": {
+                            "description": "Current authenticated user",
+                            "content": {
+                                "application/json": {
+                                    "schema": {
+                                        "$ref": "#/components/schemas/AuthUserResponse"
+                                    }
+                                }
+                            }
+                        },
+                        "401": {
+                            "description": "Missing or invalid bearer token",
                             "content": {
                                 "application/json": {
                                     "schema": {
@@ -188,37 +269,89 @@ fn build_openapi_document() -> Value {
             }
         },
         "components": {
+            "securitySchemes": {
+                "bearerAuth": {
+                    "type": "http",
+                    "scheme": "bearer",
+                    "bearerFormat": "Opaque"
+                }
+            },
             "schemas": {
-                "PolymarketAuthRequest": {
+                "CreateChallengeRequest": {
                     "type": "object",
+                    "required": ["wallet_address"],
                     "properties": {
-                        "nonce": {
-                            "type": "integer",
-                            "format": "uint32",
-                            "nullable": true,
-                            "example": 0
+                        "wallet_address": {
+                            "type": "string",
+                            "example": "0x1234567890abcdef1234567890abcdef12345678"
                         }
                     }
                 },
-                "PolymarketAuthResponse": {
+                "CreateChallengeResponse": {
                     "type": "object",
-                    "required": ["address", "apiKey", "secret", "passphrase"],
+                    "required": ["wallet_address", "nonce", "message", "expires_at"],
                     "properties": {
-                        "address": {
+                        "wallet_address": {
                             "type": "string",
                             "example": "0x1234567890abcdef1234567890abcdef12345678"
                         },
-                        "apiKey": {
+                        "nonce": {
                             "type": "string",
                             "example": "550e8400-e29b-41d4-a716-446655440000"
                         },
-                        "secret": {
+                        "message": {
                             "type": "string",
-                            "example": "base64EncodedSecretString"
+                            "example": "Sign in to Uptions\nAddress: 0x1234567890abcdef1234567890abcdef12345678\nNonce: 550e8400-e29b-41d4-a716-446655440000"
                         },
-                        "passphrase": {
+                        "expires_at": {
+                            "type": "integer",
+                            "format": "uint64",
+                            "example": 1760000000
+                        }
+                    }
+                },
+                "VerifyChallengeRequest": {
+                    "type": "object",
+                    "required": ["wallet_address", "signature"],
+                    "properties": {
+                        "wallet_address": {
                             "type": "string",
-                            "example": "randomPassphraseString"
+                            "example": "0x1234567890abcdef1234567890abcdef12345678"
+                        },
+                        "signature": {
+                            "type": "string",
+                            "example": "0x5f2c9c0d93b1b3fddc55c4f98ccf5281af2c0612fd4f2cfd2c7d4dd4f3838f620dcf54e02db91f7df0ec6ee25b9e6f74fd839cc13a5d08d64f6b3db2de4d6c881b"
+                        }
+                    }
+                },
+                "VerifyChallengeResponse": {
+                    "type": "object",
+                    "required": ["access_token", "token_type", "user"],
+                    "properties": {
+                        "access_token": {
+                            "type": "string",
+                            "example": "8c472518-9cfe-4c5b-bb7b-8da1be2aef4d"
+                        },
+                        "token_type": {
+                            "type": "string",
+                            "example": "Bearer"
+                        },
+                        "user": {
+                            "$ref": "#/components/schemas/AuthUserResponse"
+                        }
+                    }
+                },
+                "AuthUserResponse": {
+                    "type": "object",
+                    "required": ["wallet_address", "polymarket_linked"],
+                    "properties": {
+                        "wallet_address": {
+                            "type": "string",
+                            "example": "0x1234567890abcdef1234567890abcdef12345678"
+                        },
+                        "polymarket_linked": {
+                            "type": "boolean",
+                            "example": false
                         }
                     }
                 },
