@@ -1,7 +1,5 @@
-use crate::{
-    db::{DbPool, get_connection},
-    error::AppError,
-};
+use crate::{db::Db, entities::waitlist, error::AppError};
+use sea_orm::{ActiveModelTrait, Set};
 
 pub struct JoinWaitlistStruct {
     pub name: String,
@@ -10,17 +8,22 @@ pub struct JoinWaitlistStruct {
 
 #[derive(Clone)]
 pub struct UserService {
-    db: DbPool,
+    db: Db,
 }
 
 impl UserService {
-    pub fn new(db: DbPool) -> Self {
+    pub fn new(db: Db) -> Self {
         Self { db }
     }
 
     pub async fn join_waitlist(&self, payload: JoinWaitlistStruct) -> Result<(), AppError> {
-        let _ = payload;
-        let _connection = get_connection(&self.db)?;
+        waitlist::ActiveModel {
+            name: Set(payload.name),
+            email: Set(payload.email),
+            ..Default::default()
+        }
+        .insert(&self.db)
+        .await?;
 
         Ok(())
     }

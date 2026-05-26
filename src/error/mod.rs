@@ -3,7 +3,17 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
 };
+use serde::Serialize;
 use serde_json::json;
+use utoipa::ToSchema;
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ErrorResponse {
+    #[schema(example = false)]
+    pub success: bool,
+    #[schema(example = "External API error: invalid request")]
+    pub message: String,
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum AppError {
@@ -38,8 +48,8 @@ impl IntoResponse for AppError {
     }
 }
 
-impl From<diesel::r2d2::PoolError> for AppError {
-    fn from(error: diesel::r2d2::PoolError) -> Self {
+impl From<sea_orm::DbErr> for AppError {
+    fn from(error: sea_orm::DbErr) -> Self {
         Self::DatabaseError(error.to_string())
     }
 }

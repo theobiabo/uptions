@@ -14,6 +14,14 @@ use crate::{
     users::handler::join_waitlist,
 };
 
+#[utoipa::path(
+    get,
+    path = "/api/v1/health",
+    tag = "Health",
+    responses(
+        (status = 200, description = "Application is healthy", body = String, content_type = "text/plain")
+    )
+)]
 async fn health_check() -> &'static str {
     "Uptions endpoint is running"
 }

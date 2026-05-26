@@ -1,18 +1,9 @@
-use diesel::{
-    PgConnection,
-    r2d2::{ConnectionManager, Pool, PooledConnection},
-};
+use sea_orm::{Database, DatabaseConnection, DbErr};
 
 use crate::config::AppConfig;
 
-pub type DbPool = Pool<ConnectionManager<PgConnection>>;
-pub type DbConnection = PooledConnection<ConnectionManager<PgConnection>>;
+pub type Db = DatabaseConnection;
 
-pub fn create_pool(config: &AppConfig) -> Result<DbPool, diesel::r2d2::PoolError> {
-    let manager = ConnectionManager::<PgConnection>::new(config.database_url.clone());
-    Pool::builder().build(manager)
-}
-
-pub fn get_connection(pool: &DbPool) -> Result<DbConnection, diesel::r2d2::PoolError> {
-    pool.get()
+pub async fn connect(config: &AppConfig) -> Result<Db, DbErr> {
+    Database::connect(&config.database_url).await
 }

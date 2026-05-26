@@ -2,6 +2,7 @@ mod app;
 mod auth;
 mod config;
 pub mod db;
+mod entities;
 mod error;
 mod polymarket;
 pub mod users;
@@ -15,7 +16,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let config = AppConfig::from_env();
     let address = config.server_address.clone();
-    let state = AppState::new(config)?;
+    let state = AppState::new(config).await?;
     let app = create_app(state);
 
     let listener = TcpListener::bind(&address)
