@@ -1,0 +1,42 @@
+services:
+  api:
+    build:
+      context: .
+      target: dev
+    command: cargo watch -x run
+    environment:
+      SERVER_ADDRESS: 0.0.0.0:3000
+      DATABASE_URL: postgres://uptions:uptions@db:5432/uptions
+      POLYMARKET_GAMMA_HOST: https://gamma-api.polymarket.com
+    ports:
+      - "3000:3000"
+    volumes:
+      - .:/app
+      - cargo-registry:/usr/local/cargo/registry
+      - cargo-git:/usr/local/cargo/git
+      - target:/app/target
+    depends_on:
+      db:
+        condition: service_healthy
+
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: uptions
+      POSTGRES_PASSWORD: uptions
+      POSTGRES_DB: uptions
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U uptions -d uptions"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  cargo-registry:
+  cargo-git:
+  target:
+  postgres-data:

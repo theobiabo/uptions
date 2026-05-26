@@ -13,9 +13,7 @@ use tokio::sync::RwLock;
 use uuid::Uuid;
 
 use crate::{
-    auth::dto::{
-        AuthUserResponse, CreateChallengeResponse, VerifyChallengeResponse,
-    },
+    auth::dto::{AuthUserResponse, CreateChallengeResponse, VerifyChallengeResponse},
     error::AppError,
 };
 
@@ -54,9 +52,7 @@ impl AuthService {
         let wallet_address = normalize_wallet_address(wallet_address)?;
         let nonce = Uuid::new_v4().to_string();
         let expires_at = unix_timestamp() + CHALLENGE_TTL_SECONDS;
-        let message = format!(
-            "Sign in to Uptions\nAddress: {wallet_address}\nNonce: {nonce}"
-        );
+        let message = format!("Sign in to Uptions\nAddress: {wallet_address}\nNonce: {nonce}");
 
         let record = ChallengeRecord {
             wallet_address: wallet_address.clone(),
@@ -123,9 +119,7 @@ impl AuthService {
 
     pub async fn current_user(&self, access_token: &str) -> Result<AuthUserResponse, AppError> {
         let sessions = self.sessions.read().await;
-        let session = sessions
-            .get(access_token)
-            .ok_or(AppError::Unauthorized)?;
+        let session = sessions.get(access_token).ok_or(AppError::Unauthorized)?;
 
         Ok(AuthUserResponse {
             wallet_address: session.wallet_address.clone(),
@@ -140,12 +134,14 @@ fn recover_wallet_address(message: &str, signature: &str) -> Result<String, AppE
         return Err(AppError::Unauthorized);
     }
 
-    let signature = Signature::try_from(&signature_bytes[..64]).map_err(|_| AppError::Unauthorized)?;
-    let recovery_byte = normalize_recovery_byte(signature_bytes[64]).ok_or(AppError::Unauthorized)?;
+    let signature =
+        Signature::try_from(&signature_bytes[..64]).map_err(|_| AppError::Unauthorized)?;
+    let recovery_byte =
+        normalize_recovery_byte(signature_bytes[64]).ok_or(AppError::Unauthorized)?;
     let recovery_id = RecoveryId::from_byte(recovery_byte).ok_or(AppError::Unauthorized)?;
     let digest = ethereum_message_digest(message);
-    let verifying_key =
-        VerifyingKey::recover_from_digest(digest, &signature, recovery_id).map_err(|_| AppError::Unauthorized)?;
+    let verifying_key = VerifyingKey::recover_from_digest(digest, &signature, recovery_id)
+        .map_err(|_| AppError::Unauthorized)?;
 
     Ok(verifying_key_to_address(&verifying_key))
 }

@@ -4,11 +4,7 @@ use axum::{
 };
 use serde_json::Value;
 
-use crate::{
-    app::state::AppState,
-    error::AppError,
-    polymarket::dto::MarketsQuery,
-};
+use crate::{app::state::AppState, error::AppError, polymarket::dto::MarketsQuery};
 
 pub async fn fetch_markets(
     State(state): State<AppState>,

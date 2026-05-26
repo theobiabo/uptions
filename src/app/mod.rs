@@ -11,6 +11,7 @@ use crate::{
     app::state::AppState,
     auth::handlers::{create_challenge, current_user, verify_challenge},
     polymarket::handlers::fetch_markets,
+    users::handler::join_waitlist,
 };
 
 async fn health_check() -> &'static str {
@@ -24,6 +25,7 @@ fn api_v1_router() -> Router<AppState> {
         .route("/auth/verify", post(verify_challenge))
         .route("/auth/me", get(current_user))
         .route("/polymarket/markets", get(fetch_markets))
+        .route("/users/waitlist", post(join_waitlist))
 }
 
 pub fn create_app(state: AppState) -> Router {
