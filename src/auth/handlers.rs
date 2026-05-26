@@ -6,14 +6,28 @@ use axum::{
 
 use crate::{
     app::state::AppState,
-    auth::dto::{CreateChallengeRequest, VerifyChallengeRequest},
-    error::AppError,
+    auth::dto::{
+        AuthUserResponse, CreateChallengeRequest, CreateChallengeResponse, VerifyChallengeRequest,
+        VerifyChallengeResponse,
+    },
+    error::{AppError, ErrorResponse},
 };
 
+#[utoipa::path(
+    post,
+    path = "/api/v1/auth/challenge",
+    tag = "Auth",
+    request_body = CreateChallengeRequest,
+    responses(
+        (status = 200, description = "Challenge created successfully", body = CreateChallengeResponse),
+        (status = 400, description = "Invalid wallet address", body = ErrorResponse),
+        (status = 500, description = "Server or configuration failure", body = ErrorResponse)
+    )
+)]
 pub async fn create_challenge(
     State(state): State<AppState>,
     Json(payload): Json<CreateChallengeRequest>,
-) -> Result<Json<crate::auth::dto::CreateChallengeResponse>, AppError> {
+) -> Result<Json<CreateChallengeResponse>, AppError> {
     let response = state
         .auth_service
         .create_challenge(&payload.wallet_address)
@@ -22,10 +36,21 @@ pub async fn create_challenge(
     Ok(Json(response))
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/v1/auth/verify",
+    tag = "Auth",
+    request_body = VerifyChallengeRequest,
+    responses(
+        (status = 200, description = "Wallet verified and session issued", body = VerifyChallengeResponse),
+        (status = 400, description = "Invalid or expired challenge", body = ErrorResponse),
+        (status = 401, description = "Invalid signature", body = ErrorResponse)
+    )
+)]
 pub async fn verify_challenge(
     State(state): State<AppState>,
     Json(payload): Json<VerifyChallengeRequest>,
-) -> Result<Json<crate::auth::dto::VerifyChallengeResponse>, AppError> {
+) -> Result<Json<VerifyChallengeResponse>, AppError> {
     let response = state
         .auth_service
         .verify_challenge(&payload.wallet_address, &payload.signature)
@@ -34,10 +59,20 @@ pub async fn verify_challenge(
     Ok(Json(response))
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/v1/auth/me",
+    tag = "Auth",
+    security(("bearer_auth" = [])),
+    responses(
+        (status = 200, description = "Current authenticated user", body = AuthUserResponse),
+        (status = 401, description = "Missing or invalid bearer token", body = ErrorResponse)
+    )
+)]
 pub async fn current_user(
     State(state): State<AppState>,
     headers: HeaderMap,
-) -> Result<Json<crate::auth::dto::AuthUserResponse>, AppError> {
+) -> Result<Json<AuthUserResponse>, AppError> {
     let access_token = bearer_token(&headers)?;
     let user = state.auth_service.current_user(&access_token).await?;
 
