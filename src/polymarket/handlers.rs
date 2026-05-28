@@ -8,6 +8,7 @@ use crate::{
     app::state::AppState,
     error::{AppError, ErrorResponse},
     polymarket::dto::MarketsQuery,
+    response::{ApiResponse, ok},
 };
 
 #[utoipa::path(
@@ -16,15 +17,15 @@ use crate::{
     tag = "Polymarket",
     params(MarketsQuery),
     responses(
-        (status = 200, description = "Raw Polymarket markets payload", body = Value),
+        (status = 200, description = "Raw Polymarket markets payload", body = ApiResponse<Value>),
         (status = 502, description = "Upstream Polymarket error", body = ErrorResponse)
     )
 )]
 pub async fn fetch_markets(
     State(state): State<AppState>,
     Query(query): Query<MarketsQuery>,
-) -> Result<Json<Value>, AppError> {
+) -> Result<Json<ApiResponse<Value>>, AppError> {
     let markets = state.polymarket_client.fetch_markets(&query).await?;
 
-    Ok(Json(markets))
+    Ok(ok("Markets fetched successfully", markets))
 }

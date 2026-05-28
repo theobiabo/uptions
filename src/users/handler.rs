@@ -5,6 +5,7 @@ use utoipa::ToSchema;
 use crate::{
     app::state::AppState,
     error::{AppError, ErrorResponse},
+    response::{ApiResponse, created},
     users::service::JoinWaitlistStruct,
 };
 
@@ -12,8 +13,12 @@ use crate::{
 pub struct WaitlistUser {
     #[schema(example = "ada@example.com")]
     email: String,
-    #[schema(example = "Ada Lovelace")]
-    name: String,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct WaitlistResponse {
+    #[schema(example = "ada@example.com")]
+    email: String,
 }
 
 #[utoipa::path(
@@ -22,21 +27,25 @@ pub struct WaitlistUser {
     tag = "Users",
     request_body = WaitlistUser,
     responses(
-        (status = 201, description = "User joined the waitlist"),
+        (status = 201, description = "User joined the waitlist", body = ApiResponse<WaitlistResponse>),
         (status = 500, description = "Database failure", body = ErrorResponse)
     )
 )]
 pub async fn join_waitlist(
     State(state): State<AppState>,
     Json(payload): Json<WaitlistUser>,
-) -> Result<StatusCode, AppError> {
+) -> Result<(StatusCode, Json<ApiResponse<WaitlistResponse>>), AppError> {
+    let email = payload.email;
+
     state
         .user_service
         .join_waitlist(JoinWaitlistStruct {
-            name: payload.name,
-            email: payload.email,
+            email: email.clone(),
         })
         .await?;
 
-    Ok(StatusCode::CREATED)
+    Ok(created(
+        "User joined the waitlist",
+        WaitlistResponse { email },
+    ))
 }

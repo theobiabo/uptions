@@ -14,7 +14,8 @@ use crate::{
     },
     error::ErrorResponse,
     polymarket::dto::MarketsQuery,
-    users::handler::WaitlistUser,
+    response::ApiResponse,
+    users::handler::{WaitlistResponse, WaitlistUser},
 };
 
 #[derive(OpenApi)]
@@ -30,12 +31,18 @@ use crate::{
     components(
         schemas(
             AuthUserResponse,
+            ApiResponse<AuthUserResponse>,
+            ApiResponse<CreateChallengeResponse>,
+            ApiResponse<String>,
+            ApiResponse<VerifyChallengeResponse>,
+            ApiResponse<WaitlistResponse>,
             CreateChallengeRequest,
             CreateChallengeResponse,
             ErrorResponse,
             MarketsQuery,
             VerifyChallengeRequest,
             VerifyChallengeResponse,
+            WaitlistResponse,
             WaitlistUser
         )
     ),

@@ -2,7 +2,6 @@ use crate::{db::Db, entities::waitlist, error::AppError};
 use sea_orm::{ActiveModelTrait, Set};
 
 pub struct JoinWaitlistStruct {
-    pub name: String,
     pub email: String,
 }
 
@@ -18,7 +17,6 @@ impl UserService {
 
     pub async fn join_waitlist(&self, payload: JoinWaitlistStruct) -> Result<(), AppError> {
         waitlist::ActiveModel {
-            name: Set(payload.name),
             email: Set(payload.email),
             ..Default::default()
         }
