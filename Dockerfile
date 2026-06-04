@@ -2,6 +2,8 @@ FROM rust:1-bookworm AS dev
 
 WORKDIR /app
 
+COPY . .
+
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates libpq-dev pkg-config \
     && cargo install cargo-watch \
