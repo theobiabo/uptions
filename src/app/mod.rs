@@ -3,9 +3,13 @@ pub mod state;
 
 use axum::{
     Json, Router,
+    http::{HeaderValue, Method},
     routing::{get, post},
 };
-use tower_http::trace::{DefaultMakeSpan, DefaultOnRequest, DefaultOnResponse, TraceLayer};
+use tower_http::{
+    cors::{AllowOrigin, Any, CorsLayer},
+    trace::{DefaultMakeSpan, DefaultOnRequest, DefaultOnResponse, TraceLayer},
+};
 use tracing::Level;
 
 use crate::{
@@ -40,12 +44,57 @@ fn api_v1_router() -> Router<AppState> {
         .route("/users/waitlist", post(join_waitlist))
 }
 
+fn is_allowed_origin(origin: &HeaderValue) -> bool {
+    let Ok(origin) = origin.to_str() else {
+        return false;
+    };
+
+    if origin == "https://www.uptions.xyz" {
+        return true;
+    }
+
+    let Some(host_start) = origin.find("://").map(|index| index + 3) else {
+        return false;
+    };
+
+    let host_and_port = origin[host_start..]
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or_default();
+
+    let host = host_and_port
+        .split(':')
+        .next()
+        .unwrap_or_default()
+        .trim_matches('[')
+        .trim_matches(']');
+
+    host.eq_ignore_ascii_case("localhost")
+}
+
+fn cors_layer() -> CorsLayer {
+    CorsLayer::new()
+        .allow_origin(AllowOrigin::predicate(|origin, _request_parts| {
+            is_allowed_origin(origin)
+        }))
+        .allow_methods([
+            Method::GET,
+            Method::POST,
+            Method::PUT,
+            Method::PATCH,
+            Method::DELETE,
+            Method::OPTIONS,
+        ])
+        .allow_headers(Any)
+}
+
 pub fn create_app(state: AppState) -> Router {
     Router::new()
         .route("/", get(health_check))
         .route("/docs", get(swagger_ui))
         .route("/docs/openapi.json", get(openapi_json))
         .nest("/api/v1", api_v1_router())
+        .layer(cors_layer())
         .layer(
             TraceLayer::new_for_http()
                 .make_span_with(DefaultMakeSpan::new().level(Level::INFO))
@@ -53,4 +102,37 @@ pub fn create_app(state: AppState) -> Router {
                 .on_response(DefaultOnResponse::new().level(Level::INFO)),
         )
         .with_state(state)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_allowed_origin;
+    use axum::http::HeaderValue;
+
+    #[test]
+    fn allows_configured_production_origin() {
+        assert!(is_allowed_origin(&HeaderValue::from_static(
+            "https://www.uptions.xyz",
+        )));
+    }
+
+    #[test]
+    fn allows_localhost_on_any_port() {
+        assert!(is_allowed_origin(&HeaderValue::from_static(
+            "http://localhost:5173",
+        )));
+        assert!(is_allowed_origin(&HeaderValue::from_static(
+            "https://localhost:3000",
+        )));
+    }
+
+    #[test]
+    fn rejects_other_origins() {
+        assert!(!is_allowed_origin(&HeaderValue::from_static(
+            "https://uptions.xyz",
+        )));
+        assert!(!is_allowed_origin(&HeaderValue::from_static(
+            "https://example.com",
+        )));
+    }
 }
