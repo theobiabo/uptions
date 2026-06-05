@@ -4,6 +4,7 @@ mod config;
 pub mod db;
 mod entities;
 mod error;
+pub mod libs;
 mod polymarket;
 mod response;
 pub mod users;

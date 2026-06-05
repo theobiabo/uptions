@@ -1,4 +1,4 @@
-use crate::{db::Db, entities::waitlist, error::AppError};
+use crate::{db::Db, entities::waitlist, error::AppError, libs::resend_client::send_email};
 use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
 
 pub struct JoinWaitlistStruct {
@@ -34,11 +34,21 @@ impl UserService {
         }
 
         waitlist::ActiveModel {
-            email: Set(email),
+            email: Set(email.clone()),
             ..Default::default()
         }
         .insert(&self.db)
         .await?;
+
+        let subject = "You joined the Uptions waitlist";
+        let html_body = format!(
+            "<h1>You are on the waitlist</h1><p>Thanks for joining Uptions with {}.</p>",
+            email
+        );
+
+        if let Err(error) = send_email(&email, subject, &html_body).await {
+            tracing::error!(email = %email, error = %error, "failed to send waitlist email");
+        }
 
         Ok(())
     }

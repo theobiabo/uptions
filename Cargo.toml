@@ -24,3 +24,4 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 tower-http = { version = "0.6.6", features = ["cors", "trace"] }
 utoipa = { version = "5.4.0", features = ["axum_extras"] }
 uuid = { version = "1.18.1", features = ["v4", "serde"] }
+resend-rs = "0.25.1"
