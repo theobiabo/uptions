@@ -83,7 +83,6 @@ fn waitlist_email_template(email: &str) -> String {
           </tr>
           <tr>
             <td style="padding:44px 28px 20px;">
-              <div style="display:inline-block; width:44px; height:44px; background:#ff4f00; color:#ffffff; text-align:center; line-height:44px; font-size:22px; font-weight:800; margin-bottom:22px;">U</div>
               <h1 style="margin:0; color:#111111; font-size:38px; line-height:0.98; font-weight:800; letter-spacing:0;">You are on the list.</h1>
               <p style="margin:18px 0 0; color:rgba(17,17,17,0.64); font-size:16px; line-height:1.65;">Thanks for joining Uptions. We saved <strong style="color:#111111;">{escaped_email}</strong> and will send product access updates to this address.</p>
             </td>
