@@ -1,25 +1,34 @@
 use std::{
     collections::HashMap,
     sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+use aes_gcm::{
+    Aes256Gcm, Nonce,
+    aead::{Aead, KeyInit},
+};
+use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier, password_hash::SaltString};
+use base64::{Engine, engine::general_purpose::STANDARD};
+use chrono::{DateTime, Utc};
 use k256::{
     EncodedPoint,
     ecdsa::{RecoveryId, Signature, VerifyingKey},
 };
+use rand_core::{OsRng, RngCore};
 use sha3::{Digest, Keccak256};
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
 use crate::{
     auth::dto::{
-        AuthUserResponse, ConnectPolymarketRequest, CreateChallengeResponse,
-        VenueConnectionResponse, VerifyChallengeResponse,
+        AuthSessionResponse, AuthUserResponse, ConnectPolymarketRequest, CreateChallengeResponse,
+        LoginRequest, SignupRequest, VenueConnectionResponse, VerifyChallengeResponse,
     },
     db::Db,
-    entities::{auth_method, user, venue_connection},
+    entities::{auth_method, user, user_session, venue_connection},
     error::AppError,
+    libs::resend_client::send_email,
 };
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, EntityTrait, IntoActiveModel, QueryFilter, Set,
@@ -28,12 +37,14 @@ use sea_orm::{
 use serde_json::{Value, json};
 
 const CHALLENGE_TTL_SECONDS: u64 = 300;
+const SESSION_TTL_SECONDS: u64 = 60 * 60 * 24 * 30;
+const MIN_PASSWORD_LENGTH: usize = 8;
 
 #[derive(Clone)]
 pub struct AuthService {
     challenges: Arc<RwLock<HashMap<String, ChallengeRecord>>>,
+    credential_encryption_key: [u8; 32],
     db: Db,
-    sessions: Arc<RwLock<HashMap<String, SessionRecord>>>,
 }
 
 #[derive(Clone)]
@@ -46,15 +57,15 @@ struct ChallengeRecord {
 #[derive(Clone)]
 struct SessionRecord {
     user_id: String,
-    wallet_address: String,
 }
 
 impl AuthService {
-    pub fn new(db: Db) -> Self {
+    pub fn new(db: Db, credential_encryption_key: String) -> Self {
         Self {
             challenges: Arc::new(RwLock::new(HashMap::new())),
+            credential_encryption_key: parse_encryption_key(&credential_encryption_key)
+                .expect("CREDENTIAL_ENCRYPTION_KEY must resolve to 32 bytes"),
             db,
-            sessions: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -86,6 +97,54 @@ impl AuthService {
         })
     }
 
+    pub async fn signup(&self, payload: SignupRequest) -> Result<AuthSessionResponse, AppError> {
+        let email = normalize_email(&payload.email)?;
+        validate_password(&payload.password)?;
+
+        let existing = user::Entity::find()
+            .filter(user::Column::Email.eq(Some(email.clone())))
+            .one(&self.db)
+            .await?;
+
+        if existing.is_some() {
+            return Err(AppError::Conflict("email is already registered".to_owned()));
+        }
+
+        let password_hash = hash_password(&payload.password)?;
+        let user_id = Uuid::new_v4().to_string();
+        let user = user::ActiveModel {
+            id: Set(user_id.clone()),
+            email: Set(Some(email.clone())),
+            password_hash: Set(Some(password_hash)),
+            ..Default::default()
+        }
+        .insert(&self.db)
+        .await?;
+
+        self.ensure_email_auth_method(&user_id, &email).await?;
+        self.send_signup_email(&email).await;
+        self.issue_session(user).await
+    }
+
+    pub async fn login(&self, payload: LoginRequest) -> Result<AuthSessionResponse, AppError> {
+        let email = normalize_email(&payload.email)?;
+        let user = user::Entity::find()
+            .filter(user::Column::Email.eq(Some(email.clone())))
+            .one(&self.db)
+            .await?
+            .ok_or(AppError::Unauthorized)?;
+
+        let Some(password_hash) = &user.password_hash else {
+            return Err(AppError::Unauthorized);
+        };
+
+        if !verify_password(&payload.password, password_hash)? {
+            return Err(AppError::Unauthorized);
+        }
+
+        self.issue_session(user).await
+    }
+
     pub async fn verify_challenge(
         &self,
         wallet_address: &str,
@@ -113,17 +172,10 @@ impl AuthService {
         }
 
         let user = self.ensure_wallet_user(&wallet_address).await?;
-        let access_token = Uuid::new_v4().to_string();
-        self.sessions.write().await.insert(
-            access_token.clone(),
-            SessionRecord {
-                user_id: user.id.clone(),
-                wallet_address: wallet_address.clone(),
-            },
-        );
+        let session = self.create_session(&user.id).await?;
 
         Ok(VerifyChallengeResponse {
-            access_token,
+            access_token: session.access_token,
             token_type: "Bearer".to_owned(),
             user: self.auth_user_response(&user).await?,
         })
@@ -145,6 +197,11 @@ impl AuthService {
         payload: ConnectPolymarketRequest,
     ) -> Result<VenueConnectionResponse, AppError> {
         let session = self.session(access_token).await?;
+        let user = user::Entity::find_by_id(&session.user_id)
+            .one(&self.db)
+            .await?
+            .ok_or(AppError::Unauthorized)?;
+
         if payload.api_key.trim().is_empty()
             || payload.secret.trim().is_empty()
             || payload.passphrase.trim().is_empty()
@@ -156,7 +213,11 @@ impl AuthService {
 
         let account_identifier = match payload.account_identifier {
             Some(address) => normalize_wallet_address(&address)?,
-            None => session.wallet_address,
+            None => user.primary_wallet_address.clone().ok_or_else(|| {
+                AppError::BadRequest(
+                    "account_identifier is required for email-authenticated users".to_owned(),
+                )
+            })?,
         };
         let funder = payload
             .funder
@@ -164,13 +225,15 @@ impl AuthService {
             .transpose()?;
         let signature_type = polymarket_signature_type(payload.signature_type)?;
         let limits = payload.limits.unwrap_or_else(|| json!({}));
-        let config = json!({
+        let permissions = payload.permissions.unwrap_or_else(default_permissions);
+        let credential_config = json!({
             "apiKey": payload.api_key,
             "secret": payload.secret,
             "passphrase": payload.passphrase,
             "funder": funder,
             "signatureType": signature_type
         });
+        let config = encrypt_json(&self.credential_encryption_key, &credential_config)?;
 
         let existing = venue_connection::Entity::find()
             .filter(venue_connection::Column::UserId.eq(&session.user_id))
@@ -185,6 +248,9 @@ impl AuthService {
                 active.config = Set(config);
                 active.enabled = Set(true);
                 active.limits = Set(limits);
+                active.auth_type = Set("api_key".to_owned());
+                active.permissions = Set(permissions);
+                active.status = Set("active".to_owned());
                 active.update(&self.db).await?
             }
             None => {
@@ -193,9 +259,12 @@ impl AuthService {
                     user_id: Set(session.user_id),
                     venue: Set("polymarket".to_owned()),
                     account_identifier: Set(account_identifier),
+                    auth_type: Set("api_key".to_owned()),
                     config: Set(config),
                     enabled: Set(true),
                     limits: Set(limits),
+                    permissions: Set(permissions),
+                    status: Set("active".to_owned()),
                     ..Default::default()
                 }
                 .insert(&self.db)
@@ -207,16 +276,25 @@ impl AuthService {
     }
 
     async fn session(&self, access_token: &str) -> Result<SessionRecord, AppError> {
-        let sessions = self.sessions.read().await;
-        sessions
-            .get(access_token)
-            .cloned()
-            .ok_or(AppError::Unauthorized)
+        let token_hash = hash_access_token(access_token);
+        let session = user_session::Entity::find()
+            .filter(user_session::Column::TokenHash.eq(token_hash))
+            .one(&self.db)
+            .await?
+            .ok_or(AppError::Unauthorized)?;
+
+        if session.expires_at.with_timezone(&Utc) < Utc::now() {
+            return Err(AppError::Unauthorized);
+        }
+
+        Ok(SessionRecord {
+            user_id: session.user_id,
+        })
     }
 
     async fn ensure_wallet_user(&self, wallet_address: &str) -> Result<user::Model, AppError> {
         if let Some(model) = user::Entity::find()
-            .filter(user::Column::PrimaryWalletAddress.eq(wallet_address))
+            .filter(user::Column::PrimaryWalletAddress.eq(Some(wallet_address.to_owned())))
             .one(&self.db)
             .await?
         {
@@ -228,7 +306,7 @@ impl AuthService {
         let user_id = Uuid::new_v4().to_string();
         let model = user::ActiveModel {
             id: Set(user_id.clone()),
-            primary_wallet_address: Set(wallet_address.to_owned()),
+            primary_wallet_address: Set(Some(wallet_address.to_owned())),
             ..Default::default()
         }
         .insert(&self.db)
@@ -267,6 +345,71 @@ impl AuthService {
         Ok(())
     }
 
+    async fn ensure_email_auth_method(&self, user_id: &str, email: &str) -> Result<(), AppError> {
+        auth_method::Entity::insert(auth_method::ActiveModel {
+            id: Set(Uuid::new_v4().to_string()),
+            user_id: Set(user_id.to_owned()),
+            method_type: Set("email".to_owned()),
+            external_id: Set(email.to_owned()),
+            meta: Set(json!({})),
+            ..Default::default()
+        })
+        .on_conflict(
+            OnConflict::columns([
+                auth_method::Column::MethodType,
+                auth_method::Column::ExternalId,
+            ])
+            .do_nothing()
+            .to_owned(),
+        )
+        .exec(&self.db)
+        .await?;
+
+        Ok(())
+    }
+
+    async fn issue_session(&self, user: user::Model) -> Result<AuthSessionResponse, AppError> {
+        let session = self.create_session(&user.id).await?;
+
+        Ok(AuthSessionResponse {
+            access_token: session.access_token,
+            token_type: "Bearer".to_owned(),
+            expires_at: session.expires_at,
+            user: self.auth_user_response(&user).await?,
+        })
+    }
+
+    async fn create_session(&self, user_id: &str) -> Result<CreatedSession, AppError> {
+        let access_token = Uuid::new_v4().to_string();
+        let expires_at_system = SystemTime::now() + Duration::from_secs(SESSION_TTL_SECONDS);
+        let expires_at: DateTime<Utc> = expires_at_system.into();
+        let expires_at_unix = expires_at.timestamp();
+
+        user_session::ActiveModel {
+            id: Set(Uuid::new_v4().to_string()),
+            user_id: Set(user_id.to_owned()),
+            token_hash: Set(hash_access_token(&access_token)),
+            expires_at: Set(expires_at.into()),
+            ..Default::default()
+        }
+        .insert(&self.db)
+        .await?;
+
+        Ok(CreatedSession {
+            access_token,
+            expires_at: expires_at_unix,
+        })
+    }
+
+    async fn send_signup_email(&self, email: &str) {
+        let subject = "Welcome to Uptions";
+        let html_body = signup_email_template(email);
+
+        if let Err(error) = send_email(email, subject, &html_body).await {
+            tracing::error!(email = %email, error = %error, "failed to send signup email");
+        }
+    }
+
     async fn auth_user_response(&self, user: &user::Model) -> Result<AuthUserResponse, AppError> {
         let venue_connections = venue_connection::Entity::find()
             .filter(venue_connection::Column::UserId.eq(&user.id))
@@ -286,13 +429,21 @@ impl AuthService {
     }
 }
 
+struct CreatedSession {
+    access_token: String,
+    expires_at: i64,
+}
+
 fn venue_connection_response(model: venue_connection::Model) -> VenueConnectionResponse {
     VenueConnectionResponse {
         id: model.id,
         venue: model.venue,
+        auth_type: model.auth_type,
         account_identifier: model.account_identifier,
         enabled: model.enabled,
         limits: redact_limits(model.limits),
+        permissions: model.permissions,
+        status: model.status,
     }
 }
 
@@ -310,6 +461,169 @@ fn polymarket_signature_type(signature_type: Option<i32>) -> Result<i32, AppErro
             "invalid polymarket signature type".to_owned(),
         ))
     }
+}
+
+fn normalize_email(email: &str) -> Result<String, AppError> {
+    let email = email.trim().to_lowercase();
+
+    if email.is_empty() || !email.contains('@') || email.len() > 255 {
+        return Err(AppError::BadRequest("valid email is required".to_owned()));
+    }
+
+    Ok(email)
+}
+
+fn validate_password(password: &str) -> Result<(), AppError> {
+    if password.len() < MIN_PASSWORD_LENGTH {
+        return Err(AppError::BadRequest(format!(
+            "password must be at least {MIN_PASSWORD_LENGTH} characters"
+        )));
+    }
+
+    Ok(())
+}
+
+fn hash_password(password: &str) -> Result<String, AppError> {
+    let salt = SaltString::generate(&mut OsRng);
+    Argon2::default()
+        .hash_password(password.as_bytes(), &salt)
+        .map(|hash| hash.to_string())
+        .map_err(|error| AppError::BadRequest(error.to_string()))
+}
+
+fn verify_password(password: &str, password_hash: &str) -> Result<bool, AppError> {
+    let parsed_hash = PasswordHash::new(password_hash).map_err(|_| AppError::Unauthorized)?;
+
+    Ok(Argon2::default()
+        .verify_password(password.as_bytes(), &parsed_hash)
+        .is_ok())
+}
+
+fn hash_access_token(access_token: &str) -> String {
+    encode_hex(&keccak256(access_token.as_bytes()))
+}
+
+fn encrypt_json(key: &[u8; 32], value: &Value) -> Result<Value, AppError> {
+    let cipher = Aes256Gcm::new_from_slice(key)
+        .map_err(|_| AppError::DatabaseError("invalid encryption key".to_owned()))?;
+    let mut nonce_bytes = [0_u8; 12];
+    OsRng.fill_bytes(&mut nonce_bytes);
+    let nonce = Nonce::from_slice(&nonce_bytes);
+    let plaintext =
+        serde_json::to_vec(value).map_err(|error| AppError::BadRequest(error.to_string()))?;
+    let ciphertext = cipher
+        .encrypt(nonce, plaintext.as_ref())
+        .map_err(|_| AppError::DatabaseError("failed to encrypt credentials".to_owned()))?;
+
+    Ok(json!({
+        "encrypted": true,
+        "cipher": "AES-256-GCM",
+        "nonce": STANDARD.encode(nonce_bytes),
+        "payload": STANDARD.encode(ciphertext)
+    }))
+}
+
+fn parse_encryption_key(value: &str) -> Result<[u8; 32], AppError> {
+    let trimmed = value.trim();
+    let decoded = if trimmed.len() == 64
+        && trimmed
+            .chars()
+            .all(|character| character.is_ascii_hexdigit())
+    {
+        decode_hex(trimmed)
+            .map_err(|_| AppError::BadRequest("invalid encryption key".to_owned()))?
+    } else {
+        STANDARD
+            .decode(trimmed)
+            .unwrap_or_else(|_| trimmed.as_bytes().to_vec())
+    };
+
+    if decoded.len() != 32 {
+        return Err(AppError::BadRequest(
+            "credential encryption key must be 32 bytes".to_owned(),
+        ));
+    }
+
+    let mut key = [0_u8; 32];
+    key.copy_from_slice(&decoded);
+    Ok(key)
+}
+
+fn default_permissions() -> Value {
+    json!({
+        "read": true,
+        "trade": false,
+        "automation": false
+    })
+}
+
+fn signup_email_template(email: &str) -> String {
+    let escaped_email = escape_html(email);
+
+    format!(
+        r#"<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Welcome to Uptions</title>
+</head>
+<body style="margin:0; padding:0; background:#f5f5f1; color:#111111; font-family:Arial, sans-serif;">
+  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background:#f5f5f1; margin:0; padding:32px 16px;">
+    <tr>
+      <td align="center">
+        <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width:560px; background:#ffffff; border:1px solid rgba(17,17,17,0.10);">
+          <tr>
+            <td style="padding:28px 28px 0;">
+              <table role="presentation" width="100%" cellspacing="0" cellpadding="0">
+                <tr>
+                  <td style="font-size:20px; line-height:1; font-weight:800; color:#111111;">Uptions<span style="color:#ff4f00;">.</span></td>
+                  <td align="right"><span style="display:inline-block; padding:7px 10px; border:1px solid rgba(17,17,17,0.10); color:rgba(17,17,17,0.58); font-size:12px; line-height:1; font-weight:700;">Account created</span></td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:42px 28px 20px;">
+              <h1 style="margin:0; color:#111111; font-size:34px; line-height:1.05; font-weight:800;">Welcome to Uptions.</h1>
+              <p style="margin:18px 0 0; color:rgba(17,17,17,0.66); font-size:16px; line-height:1.65;">Your account for <strong style="color:#111111;">{escaped_email}</strong> is ready. You can now choose a prediction market venue, connect platform credentials, and build market workflows.</p>
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:8px 28px 30px;">
+              <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="border:1px solid rgba(17,17,17,0.10); background:#ffffff;">
+                <tr>
+                  <td style="padding:18px; border-bottom:1px solid rgba(17,17,17,0.08);">
+                    <p style="margin:0 0 6px; color:#ff4f00; font-size:11px; line-height:1; font-weight:800; text-transform:uppercase;">Next step</p>
+                    <p style="margin:0; color:#111111; font-size:15px; line-height:1.55; font-weight:700;">Connect a prediction market platform</p>
+                    <p style="margin:6px 0 0; color:rgba(17,17,17,0.58); font-size:14px; line-height:1.55;">Venue credentials stay separate from your Uptions identity and can be managed per platform.</p>
+                  </td>
+                </tr>
+                <tr>
+                  <td style="padding:18px;">
+                    <p style="margin:0 0 6px; color:#00a85a; font-size:11px; line-height:1; font-weight:800; text-transform:uppercase;">Default safety</p>
+                    <p style="margin:0; color:#111111; font-size:15px; line-height:1.55; font-weight:700;">Read-only automation permissions</p>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>"#
+    )
+}
+
+fn escape_html(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
 }
 
 fn recover_wallet_address(message: &str, signature: &str) -> Result<String, AppError> {
