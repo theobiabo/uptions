@@ -3,6 +3,22 @@ use serde_json::Value;
 use utoipa::ToSchema;
 
 #[derive(Debug, Deserialize, ToSchema)]
+pub struct SignupRequest {
+    #[schema(example = "user@uptions.com")]
+    pub email: String,
+    #[schema(example = "correct horse battery staple")]
+    pub password: String,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct LoginRequest {
+    #[schema(example = "user@uptions.com")]
+    pub email: String,
+    #[schema(example = "correct horse battery staple")]
+    pub password: String,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct CreateChallengeRequest {
     #[schema(example = "0x1234567890abcdef1234567890abcdef12345678")]
     pub wallet_address: String,
@@ -37,9 +53,9 @@ pub struct AuthUserResponse {
     #[schema(example = "8c472518-9cfe-4c5b-bb7b-8da1be2aef4d")]
     pub id: String,
     #[schema(example = "0x1234567890abcdef1234567890abcdef12345678")]
-    pub primary_wallet_address: String,
+    pub primary_wallet_address: Option<String>,
     #[schema(example = "0x1234567890abcdef1234567890abcdef12345678")]
-    pub wallet_address: String,
+    pub wallet_address: Option<String>,
     #[schema(example = "user@uptions.com")]
     pub email: Option<String>,
     pub venue_connections: Vec<VenueConnectionResponse>,
@@ -55,16 +71,31 @@ pub struct VerifyChallengeResponse {
 }
 
 #[derive(Debug, Serialize, ToSchema)]
+pub struct AuthSessionResponse {
+    #[schema(example = "8c472518-9cfe-4c5b-bb7b-8da1be2aef4d")]
+    pub access_token: String,
+    #[schema(example = "Bearer")]
+    pub token_type: String,
+    pub expires_at: i64,
+    pub user: AuthUserResponse,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
 pub struct VenueConnectionResponse {
     #[schema(example = "8c472518-9cfe-4c5b-bb7b-8da1be2aef4d")]
     pub id: String,
     #[schema(example = "polymarket")]
     pub venue: String,
+    #[schema(example = "api_key")]
+    pub auth_type: String,
     #[schema(example = "0x1234567890abcdef1234567890abcdef12345678")]
     pub account_identifier: String,
     #[schema(example = true)]
     pub enabled: bool,
     pub limits: Value,
+    pub permissions: Value,
+    #[schema(example = "active")]
+    pub status: String,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -82,4 +113,5 @@ pub struct ConnectPolymarketRequest {
     #[schema(example = 3)]
     pub signature_type: Option<i32>,
     pub limits: Option<Value>,
+    pub permissions: Option<Value>,
 }

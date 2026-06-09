@@ -8,8 +8,10 @@ impl MigratorTrait for Migrator {
         vec![
             Box::new(m20260527_131801_create_waitlist::Migration),
             Box::new(m20260601_000001_identity_and_venue_connections::Migration),
+            Box::new(m20260609_000001_email_auth_and_sessions::Migration),
         ]
     }
 }
 mod m20260527_131801_create_waitlist;
 mod m20260601_000001_identity_and_venue_connections;
+mod m20260609_000001_email_auth_and_sessions;

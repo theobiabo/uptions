@@ -3,15 +3,21 @@ pub mod state;
 
 use axum::{
     Json, Router,
+    http::{HeaderValue, Method},
     routing::{get, post},
 };
-use tower_http::trace::{DefaultMakeSpan, DefaultOnRequest, DefaultOnResponse, TraceLayer};
+use tower_http::{
+    cors::{AllowHeaders, AllowOrigin, CorsLayer},
+    trace::{DefaultMakeSpan, DefaultOnRequest, DefaultOnResponse, TraceLayer},
+};
 use tracing::Level;
 
 use crate::{
     app::docs::{openapi_json, swagger_ui},
     app::state::AppState,
-    auth::handlers::{connect_polymarket, create_challenge, current_user, verify_challenge},
+    auth::handlers::{
+        connect_polymarket, create_challenge, current_user, login, signup, verify_challenge,
+    },
     polymarket::handlers::fetch_markets,
     response::{ApiResponse, ok},
     users::handler::join_waitlist,
@@ -32,12 +38,58 @@ async fn health_check() -> Json<ApiResponse<&'static str>> {
 fn api_v1_router() -> Router<AppState> {
     Router::new()
         .route("/health", get(health_check))
+        .route("/auth/signup", post(signup))
+        .route("/auth/login", post(login))
         .route("/auth/challenge", post(create_challenge))
         .route("/auth/verify", post(verify_challenge))
         .route("/auth/me", get(current_user))
         .route("/venue-connections/polymarket", post(connect_polymarket))
         .route("/polymarket/markets", get(fetch_markets))
         .route("/users/waitlist", post(join_waitlist))
+}
+
+fn is_allowed_origin(origin: &HeaderValue) -> bool {
+    let Ok(origin) = origin.to_str() else {
+        return false;
+    };
+
+    if origin == "https://www.uptions.xyz" {
+        return true;
+    }
+
+    let Some(host_start) = origin.find("://").map(|index| index + 3) else {
+        return false;
+    };
+
+    let host_and_port = origin[host_start..]
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or_default();
+
+    let host = host_and_port
+        .split(':')
+        .next()
+        .unwrap_or_default()
+        .trim_matches('[')
+        .trim_matches(']');
+
+    host.eq_ignore_ascii_case("localhost")
+}
+
+fn cors_layer() -> CorsLayer {
+    CorsLayer::new()
+        .allow_origin(AllowOrigin::predicate(|origin, _request_parts| {
+            is_allowed_origin(origin)
+        }))
+        .allow_methods([
+            Method::GET,
+            Method::POST,
+            Method::PUT,
+            Method::PATCH,
+            Method::DELETE,
+            Method::OPTIONS,
+        ])
+        .allow_headers(AllowHeaders::mirror_request())
 }
 
 pub fn create_app(state: AppState) -> Router {
@@ -52,5 +104,39 @@ pub fn create_app(state: AppState) -> Router {
                 .on_request(DefaultOnRequest::new().level(Level::INFO))
                 .on_response(DefaultOnResponse::new().level(Level::INFO)),
         )
+        .layer(cors_layer())
         .with_state(state)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_allowed_origin;
+    use axum::http::HeaderValue;
+
+    #[test]
+    fn allows_configured_production_origin() {
+        assert!(is_allowed_origin(&HeaderValue::from_static(
+            "https://www.uptions.xyz",
+        )));
+    }
+
+    #[test]
+    fn allows_localhost_on_any_port() {
+        assert!(is_allowed_origin(&HeaderValue::from_static(
+            "http://localhost:5173",
+        )));
+        assert!(is_allowed_origin(&HeaderValue::from_static(
+            "https://localhost:3000",
+        )));
+    }
+
+    #[test]
+    fn rejects_other_origins() {
+        assert!(!is_allowed_origin(&HeaderValue::from_static(
+            "https://uptions.xyz",
+        )));
+        assert!(!is_allowed_origin(&HeaderValue::from_static(
+            "https://example.com",
+        )));
+    }
 }
