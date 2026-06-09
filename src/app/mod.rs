@@ -15,7 +15,9 @@ use tracing::Level;
 use crate::{
     app::docs::{openapi_json, swagger_ui},
     app::state::AppState,
-    auth::handlers::{connect_polymarket, create_challenge, current_user, verify_challenge},
+    auth::handlers::{
+        connect_polymarket, create_challenge, current_user, login, signup, verify_challenge,
+    },
     polymarket::handlers::fetch_markets,
     response::{ApiResponse, ok},
     users::handler::join_waitlist,
@@ -36,6 +38,8 @@ async fn health_check() -> Json<ApiResponse<&'static str>> {
 fn api_v1_router() -> Router<AppState> {
     Router::new()
         .route("/health", get(health_check))
+        .route("/auth/signup", post(signup))
+        .route("/auth/login", post(login))
         .route("/auth/challenge", post(create_challenge))
         .route("/auth/verify", post(verify_challenge))
         .route("/auth/me", get(current_user))

@@ -9,9 +9,9 @@ use utoipa::{
 
 use crate::{
     auth::dto::{
-        AuthUserResponse, ConnectPolymarketRequest, CreateChallengeRequest,
-        CreateChallengeResponse, VenueConnectionResponse, VerifyChallengeRequest,
-        VerifyChallengeResponse,
+        AuthSessionResponse, AuthUserResponse, ConnectPolymarketRequest, CreateChallengeRequest,
+        CreateChallengeResponse, LoginRequest, SignupRequest, VenueConnectionResponse,
+        VerifyChallengeRequest, VerifyChallengeResponse,
     },
     error::ErrorResponse,
     polymarket::dto::MarketsQuery,
@@ -23,6 +23,8 @@ use crate::{
 #[openapi(
     paths(
         super::health_check,
+        crate::auth::handlers::signup,
+        crate::auth::handlers::login,
         crate::auth::handlers::create_challenge,
         crate::auth::handlers::verify_challenge,
         crate::auth::handlers::current_user,
@@ -33,7 +35,9 @@ use crate::{
     components(
         schemas(
             AuthUserResponse,
+            AuthSessionResponse,
             ApiResponse<AuthUserResponse>,
+            ApiResponse<AuthSessionResponse>,
             ApiResponse<CreateChallengeResponse>,
             ApiResponse<String>,
             ApiResponse<VenueConnectionResponse>,
@@ -43,7 +47,9 @@ use crate::{
             CreateChallengeRequest,
             CreateChallengeResponse,
             ErrorResponse,
+            LoginRequest,
             MarketsQuery,
+            SignupRequest,
             VenueConnectionResponse,
             VerifyChallengeRequest,
             VerifyChallengeResponse,
@@ -55,7 +61,7 @@ use crate::{
     info(
         title = "Uptions Backend API",
         version = "1.0.0",
-        description = "Versioned V1 backend endpoints for wallet identity, venue connections, and market discovery."
+        description = "Versioned V1 backend endpoints for Uptions identity, venue connections, and market discovery."
     )
 )]
 struct ApiDoc;

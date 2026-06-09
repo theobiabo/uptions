@@ -7,13 +7,53 @@ use axum::{
 use crate::{
     app::state::AppState,
     auth::dto::{
-        AuthUserResponse, ConnectPolymarketRequest, CreateChallengeRequest,
-        CreateChallengeResponse, VenueConnectionResponse, VerifyChallengeRequest,
-        VerifyChallengeResponse,
+        AuthSessionResponse, AuthUserResponse, ConnectPolymarketRequest, CreateChallengeRequest,
+        CreateChallengeResponse, LoginRequest, SignupRequest, VenueConnectionResponse,
+        VerifyChallengeRequest, VerifyChallengeResponse,
     },
     error::{AppError, ErrorResponse},
     response::{ApiResponse, ok},
 };
+
+#[utoipa::path(
+    post,
+    path = "/api/v1/auth/signup",
+    tag = "Auth",
+    request_body = SignupRequest,
+    responses(
+        (status = 200, description = "Account created and session issued", body = ApiResponse<AuthSessionResponse>),
+        (status = 400, description = "Invalid signup payload", body = ErrorResponse),
+        (status = 409, description = "Email already registered", body = ErrorResponse)
+    )
+)]
+pub async fn signup(
+    State(state): State<AppState>,
+    Json(payload): Json<SignupRequest>,
+) -> Result<Json<ApiResponse<AuthSessionResponse>>, AppError> {
+    let response = state.auth_service.signup(payload).await?;
+
+    Ok(ok("Account created successfully", response))
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/v1/auth/login",
+    tag = "Auth",
+    request_body = LoginRequest,
+    responses(
+        (status = 200, description = "Session issued", body = ApiResponse<AuthSessionResponse>),
+        (status = 400, description = "Invalid login payload", body = ErrorResponse),
+        (status = 401, description = "Invalid credentials", body = ErrorResponse)
+    )
+)]
+pub async fn login(
+    State(state): State<AppState>,
+    Json(payload): Json<LoginRequest>,
+) -> Result<Json<ApiResponse<AuthSessionResponse>>, AppError> {
+    let response = state.auth_service.login(payload).await?;
+
+    Ok(ok("Logged in successfully", response))
+}
 
 #[utoipa::path(
     post,
