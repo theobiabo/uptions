@@ -10,8 +10,9 @@ use utoipa::{
 use crate::{
     auth::dto::{
         AuthSessionResponse, AuthUserResponse, ConnectPolymarketRequest, CreateChallengeRequest,
-        CreateChallengeResponse, LoginRequest, SignupRequest, VenueConnectionResponse,
-        VerifyChallengeRequest, VerifyChallengeResponse,
+        CreateChallengeResponse, ForgotPasswordRequest, LoginRequest, ResetPasswordRequest,
+        SignupRequest, VenueConnectionResponse, VerifyChallengeRequest, VerifyChallengeResponse,
+        VerifyEmailRequest,
     },
     error::ErrorResponse,
     polymarket::dto::MarketsQuery,
@@ -25,6 +26,9 @@ use crate::{
         super::health_check,
         crate::auth::handlers::signup,
         crate::auth::handlers::login,
+        crate::auth::handlers::verify_email,
+        crate::auth::handlers::forgot_password,
+        crate::auth::handlers::reset_password,
         crate::auth::handlers::create_challenge,
         crate::auth::handlers::verify_challenge,
         crate::auth::handlers::current_user,
@@ -47,12 +51,15 @@ use crate::{
             CreateChallengeRequest,
             CreateChallengeResponse,
             ErrorResponse,
+            ForgotPasswordRequest,
             LoginRequest,
             MarketsQuery,
+            ResetPasswordRequest,
             SignupRequest,
             VenueConnectionResponse,
             VerifyChallengeRequest,
             VerifyChallengeResponse,
+            VerifyEmailRequest,
             WaitlistResponse,
             WaitlistUser
         )

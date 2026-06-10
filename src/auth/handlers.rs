@@ -8,8 +8,9 @@ use crate::{
     app::state::AppState,
     auth::dto::{
         AuthSessionResponse, AuthUserResponse, ConnectPolymarketRequest, CreateChallengeRequest,
-        CreateChallengeResponse, LoginRequest, SignupRequest, VenueConnectionResponse,
-        VerifyChallengeRequest, VerifyChallengeResponse,
+        CreateChallengeResponse, ForgotPasswordRequest, LoginRequest, ResetPasswordRequest,
+        SignupRequest, VenueConnectionResponse, VerifyChallengeRequest, VerifyChallengeResponse,
+        VerifyEmailRequest,
     },
     error::{AppError, ErrorResponse},
     response::{ApiResponse, ok},
@@ -21,7 +22,7 @@ use crate::{
     tag = "Auth",
     request_body = SignupRequest,
     responses(
-        (status = 200, description = "Account created and session issued", body = ApiResponse<AuthSessionResponse>),
+        (status = 200, description = "Account created and verification email sent", body = ApiResponse<AuthUserResponse>),
         (status = 400, description = "Invalid signup payload", body = ErrorResponse),
         (status = 409, description = "Email already registered", body = ErrorResponse)
     )
@@ -29,10 +30,13 @@ use crate::{
 pub async fn signup(
     State(state): State<AppState>,
     Json(payload): Json<SignupRequest>,
-) -> Result<Json<ApiResponse<AuthSessionResponse>>, AppError> {
+) -> Result<Json<ApiResponse<AuthUserResponse>>, AppError> {
     let response = state.auth_service.signup(payload).await?;
 
-    Ok(ok("Account created successfully", response))
+    Ok(ok(
+        "Account created. Check your email to verify it.",
+        response,
+    ))
 }
 
 #[utoipa::path(
@@ -53,6 +57,66 @@ pub async fn login(
     let response = state.auth_service.login(payload).await?;
 
     Ok(ok("Logged in successfully", response))
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/v1/auth/verify-email",
+    tag = "Auth",
+    request_body = VerifyEmailRequest,
+    responses(
+        (status = 200, description = "Email verified and session issued", body = ApiResponse<AuthSessionResponse>),
+        (status = 400, description = "Invalid or expired verification token", body = ErrorResponse)
+    )
+)]
+pub async fn verify_email(
+    State(state): State<AppState>,
+    Json(payload): Json<VerifyEmailRequest>,
+) -> Result<Json<ApiResponse<AuthSessionResponse>>, AppError> {
+    let response = state.auth_service.verify_email(&payload.token).await?;
+
+    Ok(ok("Email verified successfully", response))
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/v1/auth/forgot-password",
+    tag = "Auth",
+    request_body = ForgotPasswordRequest,
+    responses(
+        (status = 200, description = "Password reset email sent when account exists", body = ApiResponse<String>),
+        (status = 400, description = "Invalid forgot password payload", body = ErrorResponse)
+    )
+)]
+pub async fn forgot_password(
+    State(state): State<AppState>,
+    Json(payload): Json<ForgotPasswordRequest>,
+) -> Result<Json<ApiResponse<String>>, AppError> {
+    state.auth_service.forgot_password(payload).await?;
+
+    Ok(ok(
+        "If an account exists for that email, a reset link has been sent.",
+        "ok".to_owned(),
+    ))
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/v1/auth/reset-password",
+    tag = "Auth",
+    request_body = ResetPasswordRequest,
+    responses(
+        (status = 200, description = "Password reset and session issued", body = ApiResponse<AuthSessionResponse>),
+        (status = 400, description = "Invalid or expired reset token", body = ErrorResponse)
+    )
+)]
+pub async fn reset_password(
+    State(state): State<AppState>,
+    Json(payload): Json<ResetPasswordRequest>,
+) -> Result<Json<ApiResponse<AuthSessionResponse>>, AppError> {
+    let response = state.auth_service.reset_password(payload).await?;
+
+    Ok(ok("Password reset successfully", response))
 }
 
 #[utoipa::path(

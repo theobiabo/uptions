@@ -16,7 +16,8 @@ use crate::{
     app::docs::{openapi_json, swagger_ui},
     app::state::AppState,
     auth::handlers::{
-        connect_polymarket, create_challenge, current_user, login, signup, verify_challenge,
+        connect_polymarket, create_challenge, current_user, forgot_password, login, reset_password,
+        signup, verify_challenge, verify_email,
     },
     polymarket::handlers::fetch_markets,
     response::{ApiResponse, ok},
@@ -40,6 +41,9 @@ fn api_v1_router() -> Router<AppState> {
         .route("/health", get(health_check))
         .route("/auth/signup", post(signup))
         .route("/auth/login", post(login))
+        .route("/auth/verify-email", post(verify_email))
+        .route("/auth/forgot-password", post(forgot_password))
+        .route("/auth/reset-password", post(reset_password))
         .route("/auth/challenge", post(create_challenge))
         .route("/auth/verify", post(verify_challenge))
         .route("/auth/me", get(current_user))

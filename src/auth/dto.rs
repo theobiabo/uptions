@@ -19,6 +19,26 @@ pub struct LoginRequest {
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
+pub struct VerifyEmailRequest {
+    #[schema(example = "550e8400-e29b-41d4-a716-446655440000")]
+    pub token: String,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct ForgotPasswordRequest {
+    #[schema(example = "user@uptions.com")]
+    pub email: String,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct ResetPasswordRequest {
+    #[schema(example = "550e8400-e29b-41d4-a716-446655440000")]
+    pub token: String,
+    #[schema(example = "correct horse battery staple")]
+    pub password: String,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct CreateChallengeRequest {
     #[schema(example = "0x1234567890abcdef1234567890abcdef12345678")]
     pub wallet_address: String,
@@ -58,6 +78,8 @@ pub struct AuthUserResponse {
     pub wallet_address: Option<String>,
     #[schema(example = "user@uptions.com")]
     pub email: Option<String>,
+    #[schema(example = true)]
+    pub email_verified: bool,
     pub venue_connections: Vec<VenueConnectionResponse>,
 }
 

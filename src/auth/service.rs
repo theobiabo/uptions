@@ -23,7 +23,8 @@ use uuid::Uuid;
 use crate::{
     auth::dto::{
         AuthSessionResponse, AuthUserResponse, ConnectPolymarketRequest, CreateChallengeResponse,
-        LoginRequest, SignupRequest, VenueConnectionResponse, VerifyChallengeResponse,
+        ForgotPasswordRequest, LoginRequest, ResetPasswordRequest, SignupRequest,
+        VenueConnectionResponse, VerifyChallengeResponse,
     },
     db::Db,
     entities::{auth_method, user, user_session, venue_connection},
@@ -38,11 +39,14 @@ use serde_json::{Value, json};
 
 const CHALLENGE_TTL_SECONDS: u64 = 300;
 const SESSION_TTL_SECONDS: u64 = 60 * 60 * 24 * 30;
+const EMAIL_VERIFICATION_TTL_SECONDS: u64 = 60 * 60 * 24;
+const PASSWORD_RESET_TTL_SECONDS: u64 = 60 * 60;
 const MIN_PASSWORD_LENGTH: usize = 8;
 
 #[derive(Clone)]
 pub struct AuthService {
     challenges: Arc<RwLock<HashMap<String, ChallengeRecord>>>,
+    app_base_url: String,
     credential_encryption_key: [u8; 32],
     db: Db,
 }
@@ -60,9 +64,10 @@ struct SessionRecord {
 }
 
 impl AuthService {
-    pub fn new(db: Db, credential_encryption_key: String) -> Self {
+    pub fn new(db: Db, credential_encryption_key: String, app_base_url: String) -> Self {
         Self {
             challenges: Arc::new(RwLock::new(HashMap::new())),
+            app_base_url: app_base_url.trim_end_matches('/').to_owned(),
             credential_encryption_key: parse_encryption_key(&credential_encryption_key)
                 .expect("CREDENTIAL_ENCRYPTION_KEY must resolve to 32 bytes"),
             db,
@@ -97,7 +102,7 @@ impl AuthService {
         })
     }
 
-    pub async fn signup(&self, payload: SignupRequest) -> Result<AuthSessionResponse, AppError> {
+    pub async fn signup(&self, payload: SignupRequest) -> Result<AuthUserResponse, AppError> {
         let email = normalize_email(&payload.email)?;
         validate_password(&payload.password)?;
 
@@ -111,19 +116,25 @@ impl AuthService {
         }
 
         let password_hash = hash_password(&payload.password)?;
+        let verification_token = generate_auth_token();
+        let verification_expires_at =
+            timestamp_after(Duration::from_secs(EMAIL_VERIFICATION_TTL_SECONDS));
         let user_id = Uuid::new_v4().to_string();
         let user = user::ActiveModel {
             id: Set(user_id.clone()),
             email: Set(Some(email.clone())),
             password_hash: Set(Some(password_hash)),
+            email_verification_token_hash: Set(Some(hash_access_token(&verification_token))),
+            email_verification_expires_at: Set(Some(verification_expires_at.into())),
             ..Default::default()
         }
         .insert(&self.db)
         .await?;
 
         self.ensure_email_auth_method(&user_id, &email).await?;
-        self.send_signup_email(&email).await;
-        self.issue_session(user).await
+        self.send_verification_email(&email, &verification_token)
+            .await;
+        self.auth_user_response(&user).await
     }
 
     pub async fn login(&self, payload: LoginRequest) -> Result<AuthSessionResponse, AppError> {
@@ -138,9 +149,97 @@ impl AuthService {
             return Err(AppError::Unauthorized);
         };
 
+        if user.email.is_some() && user.email_verified_at.is_none() {
+            return Err(AppError::Unauthorized);
+        }
+
         if !verify_password(&payload.password, password_hash)? {
             return Err(AppError::Unauthorized);
         }
+
+        self.issue_session(user).await
+    }
+
+    pub async fn verify_email(&self, token: &str) -> Result<AuthSessionResponse, AppError> {
+        let token_hash = hash_access_token(normalize_token(token)?);
+        let user = user::Entity::find()
+            .filter(user::Column::EmailVerificationTokenHash.eq(Some(token_hash)))
+            .one(&self.db)
+            .await?
+            .ok_or_else(|| AppError::BadRequest("verification link is invalid".to_owned()))?;
+
+        let expires_at = user
+            .email_verification_expires_at
+            .ok_or_else(|| AppError::BadRequest("verification link is invalid".to_owned()))?;
+
+        if expires_at.with_timezone(&Utc) < Utc::now() {
+            return Err(AppError::BadRequest(
+                "verification link has expired".to_owned(),
+            ));
+        }
+
+        let mut active = user.into_active_model();
+        active.email_verified_at = Set(Some(Utc::now().into()));
+        active.email_verification_token_hash = Set(None);
+        active.email_verification_expires_at = Set(None);
+        let user = active.update(&self.db).await?;
+
+        self.issue_session(user).await
+    }
+
+    pub async fn forgot_password(&self, payload: ForgotPasswordRequest) -> Result<(), AppError> {
+        let email = normalize_email(&payload.email)?;
+        let Some(user) = user::Entity::find()
+            .filter(user::Column::Email.eq(Some(email.clone())))
+            .one(&self.db)
+            .await?
+        else {
+            return Ok(());
+        };
+
+        if user.password_hash.is_none() {
+            return Ok(());
+        }
+
+        let reset_token = generate_auth_token();
+        let reset_expires_at = timestamp_after(Duration::from_secs(PASSWORD_RESET_TTL_SECONDS));
+        let mut active = user.into_active_model();
+        active.password_reset_token_hash = Set(Some(hash_access_token(&reset_token)));
+        active.password_reset_expires_at = Set(Some(reset_expires_at.into()));
+        active.update(&self.db).await?;
+
+        self.send_password_reset_email(&email, &reset_token).await;
+
+        Ok(())
+    }
+
+    pub async fn reset_password(
+        &self,
+        payload: ResetPasswordRequest,
+    ) -> Result<AuthSessionResponse, AppError> {
+        let token_hash = hash_access_token(normalize_token(&payload.token)?);
+        validate_password(&payload.password)?;
+
+        let user = user::Entity::find()
+            .filter(user::Column::PasswordResetTokenHash.eq(Some(token_hash)))
+            .one(&self.db)
+            .await?
+            .ok_or_else(|| AppError::BadRequest("reset link is invalid".to_owned()))?;
+
+        let expires_at = user
+            .password_reset_expires_at
+            .ok_or_else(|| AppError::BadRequest("reset link is invalid".to_owned()))?;
+
+        if expires_at.with_timezone(&Utc) < Utc::now() {
+            return Err(AppError::BadRequest("reset link has expired".to_owned()));
+        }
+
+        let mut active = user.into_active_model();
+        active.password_hash = Set(Some(hash_password(&payload.password)?));
+        active.password_reset_token_hash = Set(None);
+        active.password_reset_expires_at = Set(None);
+        active.email_verified_at = Set(Some(Utc::now().into()));
+        let user = active.update(&self.db).await?;
 
         self.issue_session(user).await
     }
@@ -401,12 +500,23 @@ impl AuthService {
         })
     }
 
-    async fn send_signup_email(&self, email: &str) {
-        let subject = "Welcome to Uptions";
-        let html_body = signup_email_template(email);
+    async fn send_verification_email(&self, email: &str, token: &str) {
+        let subject = "Verify your Uptions account";
+        let verify_url = format!("{}/?verify_email={token}", self.app_base_url);
+        let html_body = verification_email_template(email, &verify_url);
 
         if let Err(error) = send_email(email, subject, &html_body).await {
-            tracing::error!(email = %email, error = %error, "failed to send signup email");
+            tracing::error!(email = %email, error = %error, "failed to send verification email");
+        }
+    }
+
+    async fn send_password_reset_email(&self, email: &str, token: &str) {
+        let subject = "Reset your Uptions password";
+        let reset_url = format!("{}/?reset_password={token}", self.app_base_url);
+        let html_body = password_reset_email_template(email, &reset_url);
+
+        if let Err(error) = send_email(email, subject, &html_body).await {
+            tracing::error!(email = %email, error = %error, "failed to send password reset email");
         }
     }
 
@@ -424,6 +534,7 @@ impl AuthService {
             primary_wallet_address: user.primary_wallet_address.clone(),
             wallet_address: user.primary_wallet_address.clone(),
             email: user.email.clone(),
+            email_verified: user.email.is_none() || user.email_verified_at.is_some(),
             venue_connections,
         })
     }
@@ -503,6 +614,24 @@ fn hash_access_token(access_token: &str) -> String {
     encode_hex(&keccak256(access_token.as_bytes()))
 }
 
+fn generate_auth_token() -> String {
+    Uuid::new_v4().to_string()
+}
+
+fn normalize_token(token: &str) -> Result<&str, AppError> {
+    let token = token.trim();
+
+    if token.is_empty() || token.len() > 128 {
+        return Err(AppError::BadRequest("valid token is required".to_owned()));
+    }
+
+    Ok(token)
+}
+
+fn timestamp_after(duration: Duration) -> DateTime<Utc> {
+    (SystemTime::now() + duration).into()
+}
+
 fn encrypt_json(key: &[u8; 32], value: &Value) -> Result<Value, AppError> {
     let cipher = Aes256Gcm::new_from_slice(key)
         .map_err(|_| AppError::DatabaseError("invalid encryption key".to_owned()))?;
@@ -557,8 +686,9 @@ fn default_permissions() -> Value {
     })
 }
 
-fn signup_email_template(email: &str) -> String {
+fn verification_email_template(email: &str, verify_url: &str) -> String {
     let escaped_email = escape_html(email);
+    let escaped_verify_url = escape_html(verify_url);
 
     format!(
         r#"<!doctype html>
@@ -566,7 +696,7 @@ fn signup_email_template(email: &str) -> String {
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Welcome to Uptions</title>
+  <title>Verify your Uptions account</title>
 </head>
 <body style="margin:0; padding:0; background:#f5f5f1; color:#111111; font-family:Arial, sans-serif;">
   <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background:#f5f5f1; margin:0; padding:32px 16px;">
@@ -578,34 +708,75 @@ fn signup_email_template(email: &str) -> String {
               <table role="presentation" width="100%" cellspacing="0" cellpadding="0">
                 <tr>
                   <td style="font-size:20px; line-height:1; font-weight:800; color:#111111;">Uptions<span style="color:#ff4f00;">.</span></td>
-                  <td align="right"><span style="display:inline-block; padding:7px 10px; border:1px solid rgba(17,17,17,0.10); color:rgba(17,17,17,0.58); font-size:12px; line-height:1; font-weight:700;">Account created</span></td>
+                  <td align="right"><span style="display:inline-block; padding:7px 10px; border:1px solid rgba(17,17,17,0.10); color:rgba(17,17,17,0.58); font-size:12px; line-height:1; font-weight:700;">Verify email</span></td>
                 </tr>
               </table>
             </td>
           </tr>
           <tr>
             <td style="padding:42px 28px 20px;">
-              <h1 style="margin:0; color:#111111; font-size:34px; line-height:1.05; font-weight:800;">Welcome to Uptions.</h1>
-              <p style="margin:18px 0 0; color:rgba(17,17,17,0.66); font-size:16px; line-height:1.65;">Your account for <strong style="color:#111111;">{escaped_email}</strong> is ready. You can now choose a prediction market venue, connect platform credentials, and build market workflows.</p>
+              <h1 style="margin:0; color:#111111; font-size:34px; line-height:1.05; font-weight:800;">Verify your email.</h1>
+              <p style="margin:18px 0 0; color:rgba(17,17,17,0.66); font-size:16px; line-height:1.65;">Confirm <strong style="color:#111111;">{escaped_email}</strong> to finish creating your Uptions account.</p>
             </td>
           </tr>
           <tr>
             <td style="padding:8px 28px 30px;">
               <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="border:1px solid rgba(17,17,17,0.10); background:#ffffff;">
                 <tr>
-                  <td style="padding:18px; border-bottom:1px solid rgba(17,17,17,0.08);">
-                    <p style="margin:0 0 6px; color:#ff4f00; font-size:11px; line-height:1; font-weight:800; text-transform:uppercase;">Next step</p>
-                    <p style="margin:0; color:#111111; font-size:15px; line-height:1.55; font-weight:700;">Connect a prediction market platform</p>
-                    <p style="margin:6px 0 0; color:rgba(17,17,17,0.58); font-size:14px; line-height:1.55;">Venue credentials stay separate from your Uptions identity and can be managed per platform.</p>
-                  </td>
-                </tr>
-                <tr>
                   <td style="padding:18px;">
-                    <p style="margin:0 0 6px; color:#00a85a; font-size:11px; line-height:1; font-weight:800; text-transform:uppercase;">Default safety</p>
-                    <p style="margin:0; color:#111111; font-size:15px; line-height:1.55; font-weight:700;">Read-only automation permissions</p>
+                    <p style="margin:0 0 6px; color:#ff4f00; font-size:11px; line-height:1; font-weight:800; text-transform:uppercase;">Next step</p>
+                    <p style="margin:0; color:#111111; font-size:15px; line-height:1.55; font-weight:700;">This link expires in 24 hours.</p>
+                    <p style="margin:18px 0 0;"><a href="{escaped_verify_url}" style="display:inline-block; background:#ff4f00; color:#ffffff; padding:12px 16px; text-decoration:none; font-size:14px; font-weight:800;">Verify account</a></p>
                   </td>
                 </tr>
               </table>
+            </td>
+          </tr>
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>"#
+    )
+}
+
+fn password_reset_email_template(email: &str, reset_url: &str) -> String {
+    let escaped_email = escape_html(email);
+    let escaped_reset_url = escape_html(reset_url);
+
+    format!(
+        r#"<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Reset your Uptions password</title>
+</head>
+<body style="margin:0; padding:0; background:#f5f5f1; color:#111111; font-family:Arial, sans-serif;">
+  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background:#f5f5f1; margin:0; padding:32px 16px;">
+    <tr>
+      <td align="center">
+        <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width:560px; background:#ffffff; border:1px solid rgba(17,17,17,0.10);">
+          <tr>
+            <td style="padding:28px 28px 0;">
+              <table role="presentation" width="100%" cellspacing="0" cellpadding="0">
+                <tr>
+                  <td style="font-size:20px; line-height:1; font-weight:800; color:#111111;">Uptions<span style="color:#ff4f00;">.</span></td>
+                  <td align="right"><span style="display:inline-block; padding:7px 10px; border:1px solid rgba(17,17,17,0.10); color:rgba(17,17,17,0.58); font-size:12px; line-height:1; font-weight:700;">Password reset</span></td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:42px 28px 20px;">
+              <h1 style="margin:0; color:#111111; font-size:34px; line-height:1.05; font-weight:800;">Reset your password.</h1>
+              <p style="margin:18px 0 0; color:rgba(17,17,17,0.66); font-size:16px; line-height:1.65;">Use this link to set a new password for <strong style="color:#111111;">{escaped_email}</strong>. It expires in 1 hour.</p>
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:8px 28px 30px;">
+              <p style="margin:0;"><a href="{escaped_reset_url}" style="display:inline-block; background:#ff4f00; color:#ffffff; padding:12px 16px; text-decoration:none; font-size:14px; font-weight:800;">Reset password</a></p>
             </td>
           </tr>
         </table>
