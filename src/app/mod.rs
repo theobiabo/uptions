@@ -19,7 +19,7 @@ use crate::{
         connect_polymarket, create_challenge, current_user, forgot_password, login, reset_password,
         signup, verify_challenge, verify_email,
     },
-    polymarket::handlers::fetch_markets,
+    polymarket::handlers::{fetch_market, fetch_markets},
     response::{ApiResponse, ok},
     users::handler::join_waitlist,
 };
@@ -49,6 +49,7 @@ fn api_v1_router() -> Router<AppState> {
         .route("/auth/me", get(current_user))
         .route("/venue-connections/polymarket", post(connect_polymarket))
         .route("/polymarket/markets", get(fetch_markets))
+        .route("/polymarket/markets/{market_id}", get(fetch_market))
         .route("/users/waitlist", post(join_waitlist))
 }
 
