@@ -27,6 +27,9 @@ pub enum AppError {
     Conflict(String),
 
     #[error("{0}")]
+    NotFound(String),
+
+    #[error("{0}")]
     ExternalApiError(String),
 
     #[error("{0}")]
@@ -39,6 +42,7 @@ impl IntoResponse for AppError {
             AppError::Unauthorized => StatusCode::UNAUTHORIZED,
             AppError::BadRequest(_) => StatusCode::BAD_REQUEST,
             AppError::Conflict(_) => StatusCode::CONFLICT,
+            AppError::NotFound(_) => StatusCode::NOT_FOUND,
             AppError::ExternalApiError(_) => StatusCode::BAD_GATEWAY,
             AppError::DatabaseError(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };

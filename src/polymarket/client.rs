@@ -48,4 +48,23 @@ impl PolymarketClient {
             .await
             .map_err(|error| AppError::ExternalApiError(error.to_string()))
     }
+
+    pub async fn fetch_market(&self, market_id: &str) -> Result<Value, AppError> {
+        let query = MarketsQuery {
+            id: Some(market_id.to_owned()),
+            ..Default::default()
+        };
+        let markets = self.fetch_markets(&query).await?;
+
+        match markets {
+            Value::Array(items) => items
+                .into_iter()
+                .next()
+                .ok_or_else(|| AppError::NotFound("Market not found".to_owned())),
+            market if market.is_object() => Ok(market),
+            _ => Err(AppError::ExternalApiError(
+                "Unexpected Polymarket market payload".to_owned(),
+            )),
+        }
+    }
 }

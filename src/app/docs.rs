@@ -34,6 +34,7 @@ use crate::{
         crate::auth::handlers::current_user,
         crate::auth::handlers::connect_polymarket,
         crate::polymarket::handlers::fetch_markets,
+        crate::polymarket::handlers::fetch_market,
         crate::users::handler::join_waitlist
     ),
     components(
