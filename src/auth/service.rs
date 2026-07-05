@@ -574,7 +574,7 @@ fn polymarket_signature_type(signature_type: Option<i32>) -> Result<i32, AppErro
     }
 }
 
-fn normalize_email(email: &str) -> Result<String, AppError> {
+pub fn normalize_email(email: &str) -> Result<String, AppError> {
     let email = email.trim().to_lowercase();
 
     if email.is_empty() || !email.contains('@') || email.len() > 255 {
@@ -584,7 +584,7 @@ fn normalize_email(email: &str) -> Result<String, AppError> {
     Ok(email)
 }
 
-fn validate_password(password: &str) -> Result<(), AppError> {
+pub fn validate_password(password: &str) -> Result<(), AppError> {
     if password.len() < MIN_PASSWORD_LENGTH {
         return Err(AppError::BadRequest(format!(
             "password must be at least {MIN_PASSWORD_LENGTH} characters"
@@ -594,7 +594,7 @@ fn validate_password(password: &str) -> Result<(), AppError> {
     Ok(())
 }
 
-fn hash_password(password: &str) -> Result<String, AppError> {
+pub fn hash_password(password: &str) -> Result<String, AppError> {
     let salt = SaltString::generate(&mut OsRng);
     Argon2::default()
         .hash_password(password.as_bytes(), &salt)

@@ -1,18 +1,7 @@
-mod app;
-mod auth;
-mod config;
-pub mod db;
-mod entities;
-mod error;
-pub mod libs;
-mod polymarket;
-mod response;
-pub mod users;
-
-use crate::{app::create_app, app::state::AppState, config::AppConfig};
 use tokio::net::TcpListener;
 use tracing::info;
 use tracing_subscriber::{EnvFilter, fmt};
+use uptions_backend::{app::create_app, app::state::AppState, config::AppConfig, load_env};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -33,24 +22,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     axum::serve(listener, app).await.expect("failed to serve");
 
     Ok(())
-}
-
-fn load_env() {
-    let manifest_env = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(".env");
-
-    if manifest_env.exists() {
-        if let Err(error) = dotenvy::from_path(manifest_env) {
-            panic!("failed to load .env: {error}");
-        }
-    } else {
-        match dotenvy::dotenv() {
-            Ok(_) => {}
-            Err(error) if error.not_found() => {}
-            Err(error) => {
-                panic!("failed to load .env: {error}");
-            }
-        }
-    }
 }
 
 fn init_tracing() {
