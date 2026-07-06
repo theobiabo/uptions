@@ -1,2 +1,4 @@
 [alias]
+start = "run"
+dev = "watch -x run"
 seed = "run --bin seed_users"
