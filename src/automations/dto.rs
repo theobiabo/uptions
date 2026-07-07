@@ -1,14 +1,28 @@
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, de};
 use serde_json::Value;
 use utoipa::ToSchema;
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, ToSchema)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum AutomationProvider {
     Polymarket,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+impl<'de> Deserialize<'de> for AutomationProvider {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+
+        match normalize_enum_value(&value).as_str() {
+            "POLYMARKET" => Ok(Self::Polymarket),
+            _ => Err(de::Error::custom("provider is invalid")),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, ToSchema)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum AutomationStepKind {
     Trigger,
@@ -16,7 +30,23 @@ pub enum AutomationStepKind {
     Action,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+impl<'de> Deserialize<'de> for AutomationStepKind {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+
+        match normalize_enum_value(&value).as_str() {
+            "TRIGGER" => Ok(Self::Trigger),
+            "CONDITION" => Ok(Self::Condition),
+            "ACTION" => Ok(Self::Action),
+            _ => Err(de::Error::custom("workflow step kind is invalid")),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, ToSchema)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum WorkflowActionType {
     TriggerPriceMoves,
@@ -28,6 +58,32 @@ pub enum WorkflowActionType {
     Buy,
     Sell,
     SendMessage,
+}
+
+impl<'de> Deserialize<'de> for WorkflowActionType {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+
+        match normalize_enum_value(&value).as_str() {
+            "TRIGGERPRICEMOVES" | "PRICEMOVES" => Ok(Self::TriggerPriceMoves),
+            "TRIGGERVOLUMEMOVES" | "VOLUMEMOVES" => Ok(Self::TriggerVolumeMoves),
+            "TRIGGERTIMECHECK" | "TIMECHECK" => Ok(Self::TriggerTimeCheck),
+            "CONDITIONOUTCOMEPRICEABOVE" | "OUTCOMEPRICEABOVE" => {
+                Ok(Self::ConditionOutcomePriceAbove)
+            }
+            "CONDITIONOUTCOMEPRICEBELOW" | "OUTCOMEPRICEBELOW" => {
+                Ok(Self::ConditionOutcomePriceBelow)
+            }
+            "CONDITIONVOLUMEABOVE" | "VOLUMEABOVE" => Ok(Self::ConditionVolumeAbove),
+            "BUY" | "BUYOUTCOME" => Ok(Self::Buy),
+            "SELL" | "SELLOUTCOME" => Ok(Self::Sell),
+            "SENDMESSAGE" => Ok(Self::SendMessage),
+            _ => Err(de::Error::custom("workflow action is invalid")),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
@@ -73,11 +129,26 @@ pub struct PublishAutomationRequest {
     pub workflow: WorkflowPayload,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, ToSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum AutomationStatus {
     Active,
     Paused,
+}
+
+impl<'de> Deserialize<'de> for AutomationStatus {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+
+        match normalize_enum_value(&value).as_str() {
+            "ACTIVE" => Ok(Self::Active),
+            "PAUSED" | "STOPPED" | "INACTIVE" => Ok(Self::Paused),
+            _ => Err(de::Error::custom("automation status is invalid")),
+        }
+    }
 }
 
 impl AutomationStatus {
@@ -162,4 +233,131 @@ pub struct TestRunAutomationResponse {
     #[schema(example = 3)]
     pub checked_blocks: usize,
     pub alert: AutomationAlertResponse,
+}
+
+fn normalize_enum_value(value: &str) -> String {
+    value
+        .trim()
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .flat_map(char::to_uppercase)
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{AutomationStatus, PublishAutomationRequest, UpdateAutomationStatusRequest};
+    use crate::automations::dto::{AutomationProvider, AutomationStepKind, WorkflowActionType};
+
+    #[test]
+    fn deserializes_frontend_publish_payload() {
+        let payload = serde_json::json!({
+            "title": "New Playboi Carti Album before GTA VI?",
+            "market": {
+                "id": "540818",
+                "title": "New Playboi Carti Album before GTA VI?"
+            },
+            "provider": "POLYMARKET",
+            "workflow": {
+                "version": 1,
+                "steps": [
+                    {
+                        "id": "price-moves-abc",
+                        "kind": "TRIGGER",
+                        "action": "TRIGGER_PRICE_MOVES",
+                        "params": {
+                            "outcome": "YES"
+                        }
+                    },
+                    {
+                        "id": "buy-ghi",
+                        "kind": "ACTION",
+                        "action": "BUY",
+                        "params": {
+                            "outcome": "YES",
+                            "order_type": "MARKET",
+                            "amount": 10
+                        }
+                    }
+                ],
+                "connections": [
+                    {
+                        "from": "price-moves-abc",
+                        "to": "buy-ghi"
+                    }
+                ]
+            }
+        });
+
+        let request: PublishAutomationRequest = serde_json::from_value(payload).unwrap();
+
+        assert_eq!(request.provider, AutomationProvider::Polymarket);
+        assert_eq!(request.workflow.steps[0].kind, AutomationStepKind::Trigger);
+        assert_eq!(
+            request.workflow.steps[0].action,
+            WorkflowActionType::TriggerPriceMoves
+        );
+    }
+
+    #[test]
+    fn deserializes_frontend_status_payload() {
+        let payload = serde_json::json!({ "status": "paused" });
+        let request: UpdateAutomationStatusRequest = serde_json::from_value(payload).unwrap();
+
+        assert_eq!(request.status, AutomationStatus::Paused);
+    }
+
+    #[test]
+    fn deserializes_runtime_enum_variants() {
+        let payload = serde_json::json!({
+            "title": "Runtime payload",
+            "market": {
+                "id": "540818",
+                "title": "Runtime payload"
+            },
+            "provider": "polymarket",
+            "workflow": {
+                "version": 1,
+                "steps": [
+                    {
+                        "id": "price-moves-abc",
+                        "kind": "trigger",
+                        "action": "price-moves",
+                        "params": {
+                            "outcome": "YES"
+                        }
+                    },
+                    {
+                        "id": "send-message-def",
+                        "kind": "action",
+                        "action": "send-message",
+                        "params": {
+                            "channel": "IN_APP",
+                            "message": "Market condition met"
+                        }
+                    }
+                ],
+                "connections": [
+                    {
+                        "from": "price-moves-abc",
+                        "to": "send-message-def"
+                    }
+                ]
+            }
+        });
+
+        let request: PublishAutomationRequest = serde_json::from_value(payload).unwrap();
+
+        assert_eq!(request.provider, AutomationProvider::Polymarket);
+        assert_eq!(request.workflow.steps[0].kind, AutomationStepKind::Trigger);
+        assert_eq!(
+            request.workflow.steps[0].action,
+            WorkflowActionType::TriggerPriceMoves
+        );
+        assert_eq!(request.workflow.steps[1].kind, AutomationStepKind::Action);
+        assert_eq!(
+            request.workflow.steps[1].action,
+            WorkflowActionType::SendMessage
+        );
+    }
 }
