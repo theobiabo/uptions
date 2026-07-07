@@ -163,3 +163,67 @@ pub struct TestRunAutomationResponse {
     pub checked_blocks: usize,
     pub alert: AutomationAlertResponse,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{AutomationStatus, PublishAutomationRequest, UpdateAutomationStatusRequest};
+    use crate::automations::dto::{AutomationProvider, AutomationStepKind, WorkflowActionType};
+
+    #[test]
+    fn deserializes_frontend_publish_payload() {
+        let payload = serde_json::json!({
+            "title": "New Playboi Carti Album before GTA VI?",
+            "market": {
+                "id": "540818",
+                "title": "New Playboi Carti Album before GTA VI?"
+            },
+            "provider": "POLYMARKET",
+            "workflow": {
+                "version": 1,
+                "steps": [
+                    {
+                        "id": "price-moves-abc",
+                        "kind": "TRIGGER",
+                        "action": "TRIGGER_PRICE_MOVES",
+                        "params": {
+                            "outcome": "YES"
+                        }
+                    },
+                    {
+                        "id": "buy-ghi",
+                        "kind": "ACTION",
+                        "action": "BUY",
+                        "params": {
+                            "outcome": "YES",
+                            "order_type": "MARKET",
+                            "amount": 10
+                        }
+                    }
+                ],
+                "connections": [
+                    {
+                        "from": "price-moves-abc",
+                        "to": "buy-ghi"
+                    }
+                ]
+            }
+        });
+
+        let request: PublishAutomationRequest = serde_json::from_value(payload).unwrap();
+
+        assert_eq!(request.provider, AutomationProvider::Polymarket);
+        assert_eq!(request.workflow.steps[0].kind, AutomationStepKind::Trigger);
+        assert_eq!(
+            request.workflow.steps[0].action,
+            WorkflowActionType::TriggerPriceMoves
+        );
+    }
+
+    #[test]
+    fn deserializes_frontend_status_payload() {
+        let payload = serde_json::json!({ "status": "paused" });
+        let request: UpdateAutomationStatusRequest = serde_json::from_value(payload).unwrap();
+
+        assert_eq!(request.status, AutomationStatus::Paused);
+    }
+}

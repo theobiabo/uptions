@@ -59,11 +59,7 @@ impl AutomationService {
         validate_workflow(&payload.workflow)?;
         self.validate_provider_readiness(user_id, payload.provider, &payload.workflow)
             .await?;
-        let existing = automation::Entity::find_by_id(automation_id.to_owned())
-            .filter(automation::Column::UserId.eq(user_id))
-            .one(&self.db)
-            .await?
-            .ok_or_else(|| AppError::NotFound("automation not found".to_owned()))?;
+        let existing = self.find_owned_automation(user_id, automation_id).await?;
         let title = clean_title(&payload.title)?;
         let market_id = clean_required(&payload.market.id, "market id is required")?;
         let market_title = clean_required(&payload.market.title, "market title is required")?;
@@ -88,11 +84,7 @@ impl AutomationService {
         automation_id: &str,
         status: AutomationStatus,
     ) -> Result<AutomationResponse, AppError> {
-        let model = automation::Entity::find_by_id(automation_id.to_owned())
-            .filter(automation::Column::UserId.eq(user_id))
-            .one(&self.db)
-            .await?
-            .ok_or_else(|| AppError::NotFound("automation not found".to_owned()))?;
+        let model = self.find_owned_automation(user_id, automation_id).await?;
         let mut active = model.into_active_model();
         active.status = Set(status.as_str().to_owned());
         active.updated_at = Set(Utc::now().into());
@@ -102,14 +94,8 @@ impl AutomationService {
     }
 
     pub async fn delete(&self, user_id: &str, automation_id: &str) -> Result<(), AppError> {
-        let result = automation::Entity::delete_by_id(automation_id.to_owned())
-            .filter(automation::Column::UserId.eq(user_id))
-            .exec(&self.db)
-            .await?;
-
-        if result.rows_affected == 0 {
-            return Err(AppError::NotFound("automation not found".to_owned()));
-        }
+        let model = self.find_owned_automation(user_id, automation_id).await?;
+        model.into_active_model().delete(&self.db).await?;
 
         Ok(())
     }
@@ -177,11 +163,7 @@ impl AutomationService {
             .await?;
 
         if let Some(id) = automation_id {
-            if let Some(model) = automation::Entity::find_by_id(id)
-                .filter(automation::Column::UserId.eq(user_id))
-                .one(&self.db)
-                .await?
-            {
+            if let Ok(model) = self.find_owned_automation(user_id, &id).await {
                 let mut active = model.into_active_model();
                 active.last_run_status = Set(Some("success".to_owned()));
                 active.last_run_at = Set(Some(Utc::now().into()));
@@ -196,6 +178,30 @@ impl AutomationService {
             checked_blocks,
             alert,
         })
+    }
+
+    async fn find_owned_automation(
+        &self,
+        user_id: &str,
+        automation_id: &str,
+    ) -> Result<automation::Model, AppError> {
+        let automation_id = clean_required(automation_id, "automation id is required")?;
+
+        if let Some(model) = automation::Entity::find_by_id(automation_id.clone())
+            .filter(automation::Column::UserId.eq(user_id))
+            .one(&self.db)
+            .await?
+        {
+            return Ok(model);
+        }
+
+        automation::Entity::find()
+            .filter(automation::Column::UserId.eq(user_id))
+            .filter(automation::Column::MarketId.eq(Some(automation_id)))
+            .order_by_desc(automation::Column::UpdatedAt)
+            .one(&self.db)
+            .await?
+            .ok_or_else(|| AppError::NotFound("automation not found".to_owned()))
     }
 
     async fn validate_provider_readiness(
