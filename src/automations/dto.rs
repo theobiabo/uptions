@@ -2,83 +2,106 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use utoipa::ToSchema;
 
-#[derive(Debug, Deserialize, Serialize, ToSchema)]
-pub struct WorkflowPayload {
-    pub edges: Vec<WorkflowEdgePayload>,
-    pub nodes: Vec<WorkflowNodePayload>,
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum AutomationProvider {
+    Polymarket,
 }
 
-#[derive(Debug, Deserialize, Serialize, ToSchema)]
-pub struct WorkflowNodePayload {
-    pub data: WorkflowBlockPayload,
-    #[schema(example = "trigger-1")]
-    pub id: String,
-    pub position: WorkflowPositionPayload,
-    #[schema(example = "workflowBlock")]
-    pub r#type: Option<String>,
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum AutomationStepKind {
+    Trigger,
+    Condition,
+    Action,
 }
 
-#[derive(Debug, Deserialize, Serialize, ToSchema)]
-pub struct WorkflowBlockPayload {
-    #[schema(example = "Watch a market price threshold")]
-    pub description: String,
-    #[schema(example = "price-trigger")]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum WorkflowActionType {
+    TriggerPriceMoves,
+    TriggerVolumeMoves,
+    TriggerTimeCheck,
+    ConditionOutcomePriceAbove,
+    ConditionOutcomePriceBelow,
+    ConditionVolumeAbove,
+    Buy,
+    Sell,
+    SendMessage,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+pub struct AutomationMarketPayload {
+    #[schema(example = "540818")]
     pub id: String,
-    #[schema(example = "trigger")]
-    pub kind: String,
-    #[schema(example = "Price trigger")]
+    #[schema(example = "New Playboi Carti Album before GTA VI?")]
     pub title: String,
-    #[schema(example = "yes >= 0.65")]
-    pub value: String,
-    #[schema(example = "polymarket")]
-    pub venue: String,
 }
 
-#[derive(Debug, Deserialize, Serialize, ToSchema)]
-pub struct WorkflowPositionPayload {
-    #[schema(example = 120.0)]
-    pub x: f64,
-    #[schema(example = 160.0)]
-    pub y: f64,
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+pub struct WorkflowPayload {
+    #[schema(example = 1)]
+    pub version: u16,
+    pub steps: Vec<WorkflowStepPayload>,
+    pub connections: Vec<WorkflowConnectionPayload>,
 }
 
-#[derive(Debug, Deserialize, Serialize, ToSchema)]
-pub struct WorkflowEdgePayload {
-    #[schema(example = "edge-1")]
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+pub struct WorkflowStepPayload {
+    #[schema(example = "price-moves-123")]
     pub id: String,
-    #[schema(example = "trigger-1")]
-    pub source: String,
-    #[schema(example = "action-1")]
-    pub target: String,
-    #[schema(example = "smoothstep")]
-    pub r#type: Option<String>,
+    pub kind: AutomationStepKind,
+    pub action: WorkflowActionType,
+    #[schema(value_type = Object)]
+    pub params: Value,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+pub struct WorkflowConnectionPayload {
+    #[schema(example = "price-moves-123")]
+    pub from: String,
+    #[schema(example = "outcome-price-above-456")]
+    pub to: String,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct PublishAutomationRequest {
-    #[schema(example = "Will BTC close above $100k?")]
+    #[schema(example = "New Playboi Carti Album before GTA VI?")]
     pub title: String,
-    #[schema(example = "540817")]
-    pub market_id: Option<String>,
-    #[schema(example = "Will Bitcoin close above $100,000 this year?")]
-    pub market_title: Option<String>,
-    #[schema(example = "polymarket")]
-    pub venue: String,
+    pub market: AutomationMarketPayload,
+    pub provider: AutomationProvider,
     pub workflow: WorkflowPayload,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum AutomationStatus {
+    Active,
+    Paused,
+}
+
+impl AutomationStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Paused => "paused",
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct UpdateAutomationStatusRequest {
+    pub status: AutomationStatus,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct TestRunAutomationRequest {
     #[schema(example = "4adcf640-7784-4d0d-b921-5066e4f9057b")]
     pub automation_id: Option<String>,
-    #[schema(example = "Will BTC close above $100k?")]
+    #[schema(example = "New Playboi Carti Album before GTA VI?")]
     pub title: String,
-    #[schema(example = "540817")]
-    pub market_id: Option<String>,
-    #[schema(example = "Will Bitcoin close above $100,000 this year?")]
-    pub market_title: Option<String>,
-    #[schema(example = "polymarket")]
-    pub venue: String,
+    pub market: AutomationMarketPayload,
+    pub provider: AutomationProvider,
     pub workflow: WorkflowPayload,
 }
 
@@ -86,11 +109,11 @@ pub struct TestRunAutomationRequest {
 pub struct AutomationResponse {
     #[schema(example = "4adcf640-7784-4d0d-b921-5066e4f9057b")]
     pub id: String,
-    #[schema(example = "Will BTC close above $100k?")]
+    #[schema(example = "New Playboi Carti Album before GTA VI?")]
     pub title: String,
-    #[schema(example = "540817")]
+    #[schema(example = "540818")]
     pub market_id: Option<String>,
-    #[schema(example = "Will Bitcoin close above $100,000 this year?")]
+    #[schema(example = "New Playboi Carti Album before GTA VI?")]
     pub market_title: Option<String>,
     #[schema(example = "polymarket")]
     pub venue: String,
@@ -117,7 +140,7 @@ pub struct AutomationAlertResponse {
     #[schema(example = "Test run completed")]
     pub title: String,
     #[schema(
-        example = "Test run completed successfully for Will BTC close above $100k? with 1 workflow blocks."
+        example = "Test run completed successfully for New Playboi Carti Album before GTA VI? with 3 workflow steps."
     )]
     pub message: String,
     #[schema(example = "success")]
@@ -133,10 +156,10 @@ pub struct TestRunAutomationResponse {
     #[schema(example = "success")]
     pub status: String,
     #[schema(
-        example = "Test run completed successfully for Will BTC close above $100k? with 1 workflow blocks."
+        example = "Test run completed successfully for New Playboi Carti Album before GTA VI? with 3 workflow steps."
     )]
     pub message: String,
-    #[schema(example = 1)]
+    #[schema(example = 3)]
     pub checked_blocks: usize,
     pub alert: AutomationAlertResponse,
 }

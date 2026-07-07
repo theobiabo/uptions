@@ -1,3 +1,5 @@
+use std::collections::{HashMap, HashSet};
+
 use chrono::Utc;
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, EntityTrait, IntoActiveModel, QueryFilter, QueryOrder,
@@ -8,11 +10,12 @@ use uuid::Uuid;
 
 use crate::{
     automations::dto::{
-        AutomationAlertResponse, AutomationResponse, PublishAutomationRequest,
-        TestRunAutomationRequest, TestRunAutomationResponse,
+        AutomationAlertResponse, AutomationProvider, AutomationResponse, AutomationStatus,
+        AutomationStepKind, PublishAutomationRequest, TestRunAutomationRequest,
+        TestRunAutomationResponse, WorkflowActionType, WorkflowPayload,
     },
     db::Db,
-    entities::{automation, automation_alert},
+    entities::{automation, automation_alert, venue_connection},
     error::AppError,
 };
 
@@ -47,23 +50,92 @@ impl AutomationService {
         Ok(alerts.into_iter().map(alert_response).collect())
     }
 
+    pub async fn update(
+        &self,
+        user_id: &str,
+        automation_id: &str,
+        payload: PublishAutomationRequest,
+    ) -> Result<AutomationResponse, AppError> {
+        validate_workflow(&payload.workflow)?;
+        self.validate_provider_readiness(user_id, payload.provider, &payload.workflow)
+            .await?;
+        let existing = automation::Entity::find_by_id(automation_id.to_owned())
+            .filter(automation::Column::UserId.eq(user_id))
+            .one(&self.db)
+            .await?
+            .ok_or_else(|| AppError::NotFound("automation not found".to_owned()))?;
+        let title = clean_title(&payload.title)?;
+        let market_id = clean_required(&payload.market.id, "market id is required")?;
+        let market_title = clean_required(&payload.market.title, "market title is required")?;
+        let workflow = serde_json::to_value(&payload.workflow)
+            .map_err(|error| AppError::BadRequest(error.to_string()))?;
+        let mut active = existing.into_active_model();
+        active.title = Set(title);
+        active.market_id = Set(Some(market_id));
+        active.market_title = Set(Some(market_title));
+        active.venue = Set(provider_venue(payload.provider).to_owned());
+        active.workflow = Set(workflow);
+        active.status = Set("active".to_owned());
+        active.updated_at = Set(Utc::now().into());
+        let model = active.update(&self.db).await?;
+
+        Ok(automation_response(model))
+    }
+
+    pub async fn set_status(
+        &self,
+        user_id: &str,
+        automation_id: &str,
+        status: AutomationStatus,
+    ) -> Result<AutomationResponse, AppError> {
+        let model = automation::Entity::find_by_id(automation_id.to_owned())
+            .filter(automation::Column::UserId.eq(user_id))
+            .one(&self.db)
+            .await?
+            .ok_or_else(|| AppError::NotFound("automation not found".to_owned()))?;
+        let mut active = model.into_active_model();
+        active.status = Set(status.as_str().to_owned());
+        active.updated_at = Set(Utc::now().into());
+        let model = active.update(&self.db).await?;
+
+        Ok(automation_response(model))
+    }
+
+    pub async fn delete(&self, user_id: &str, automation_id: &str) -> Result<(), AppError> {
+        let result = automation::Entity::delete_by_id(automation_id.to_owned())
+            .filter(automation::Column::UserId.eq(user_id))
+            .exec(&self.db)
+            .await?;
+
+        if result.rows_affected == 0 {
+            return Err(AppError::NotFound("automation not found".to_owned()));
+        }
+
+        Ok(())
+    }
+
     pub async fn publish(
         &self,
         user_id: &str,
         payload: PublishAutomationRequest,
     ) -> Result<AutomationResponse, AppError> {
         validate_workflow(&payload.workflow)?;
+        self.validate_provider_readiness(user_id, payload.provider, &payload.workflow)
+            .await?;
         let title = clean_title(&payload.title)?;
-        let workflow = serde_json::to_value(payload.workflow)
+        let market_id = clean_required(&payload.market.id, "market id is required")?;
+        let market_title = clean_required(&payload.market.title, "market title is required")?;
+        let venue = provider_venue(payload.provider).to_owned();
+        let workflow = serde_json::to_value(&payload.workflow)
             .map_err(|error| AppError::BadRequest(error.to_string()))?;
         let now = Utc::now();
         let model = automation::ActiveModel {
             id: Set(Uuid::new_v4().to_string()),
             user_id: Set(user_id.to_owned()),
             title: Set(title),
-            market_id: Set(clean_optional(payload.market_id)),
-            market_title: Set(clean_optional(payload.market_title)),
-            venue: Set(clean_required(&payload.venue, "venue is required")?),
+            market_id: Set(Some(market_id)),
+            market_title: Set(Some(market_title)),
+            venue: Set(venue),
             status: Set("active".to_owned()),
             workflow: Set(workflow),
             last_run_status: Set(None),
@@ -83,13 +155,26 @@ impl AutomationService {
         payload: TestRunAutomationRequest,
     ) -> Result<TestRunAutomationResponse, AppError> {
         validate_workflow(&payload.workflow)?;
-        let checked_blocks = payload.workflow.nodes.len();
+        let checked_blocks = payload.workflow.steps.len();
         let automation_id = clean_optional(payload.automation_id);
         let title = clean_title(&payload.title)?;
         let message = format!(
-            "Test run completed successfully for {title} with {checked_blocks} workflow blocks."
+            "Test run completed successfully for {title} with {checked_blocks} workflow steps."
         );
-        let alert = self.create_alert(user_id, automation_id.clone(), "Test run completed", &message, "success", json!({ "market_id": payload.market_id, "market_title": payload.market_title, "venue": payload.venue, "checked_blocks": checked_blocks })).await?;
+        let alert = self
+            .create_alert(
+                user_id,
+                automation_id.clone(),
+                "Test run completed",
+                &message,
+                "success",
+                json!({
+                    "market": payload.market,
+                    "provider": payload.provider,
+                    "checked_blocks": checked_blocks
+                }),
+            )
+            .await?;
 
         if let Some(id) = automation_id {
             if let Some(model) = automation::Entity::find_by_id(id)
@@ -111,6 +196,43 @@ impl AutomationService {
             checked_blocks,
             alert,
         })
+    }
+
+    async fn validate_provider_readiness(
+        &self,
+        user_id: &str,
+        provider: AutomationProvider,
+        workflow: &WorkflowPayload,
+    ) -> Result<(), AppError> {
+        if provider != AutomationProvider::Polymarket {
+            return Err(AppError::BadRequest(
+                "unsupported automation provider".to_owned(),
+            ));
+        }
+
+        if !workflow
+            .steps
+            .iter()
+            .any(|step| is_trade_action(step.action))
+        {
+            return Ok(());
+        }
+
+        let connection = venue_connection::Entity::find()
+            .filter(venue_connection::Column::UserId.eq(user_id))
+            .filter(venue_connection::Column::Venue.eq(provider_venue(provider)))
+            .filter(venue_connection::Column::Enabled.eq(true))
+            .filter(venue_connection::Column::Status.eq("active"))
+            .one(&self.db)
+            .await?;
+
+        if connection.is_none() {
+            return Err(AppError::BadRequest(
+                "connect Polymarket before publishing trade actions".to_owned(),
+            ));
+        }
+
+        Ok(())
     }
 
     async fn create_alert(
@@ -139,12 +261,324 @@ impl AutomationService {
     }
 }
 
-fn validate_workflow(workflow: &crate::automations::dto::WorkflowPayload) -> Result<(), AppError> {
-    if workflow.nodes.is_empty() {
+fn validate_workflow(workflow: &WorkflowPayload) -> Result<(), AppError> {
+    if workflow.version != 1 {
         return Err(AppError::BadRequest(
-            "workflow must contain at least one block".to_owned(),
+            "unsupported workflow version".to_owned(),
         ));
     }
+
+    if workflow.steps.is_empty() {
+        return Err(AppError::BadRequest(
+            "workflow must contain at least one step".to_owned(),
+        ));
+    }
+
+    let mut ids = HashSet::new();
+
+    for step in &workflow.steps {
+        clean_required(&step.id, "workflow step id is required")?;
+
+        if !ids.insert(step.id.as_str()) {
+            return Err(AppError::BadRequest(
+                "workflow contains duplicate step ids".to_owned(),
+            ));
+        }
+
+        validate_action_kind(step.kind, step.action)?;
+        validate_params(step.action, &step.params)?;
+    }
+
+    if !workflow
+        .steps
+        .iter()
+        .any(|step| step.kind == AutomationStepKind::Trigger)
+    {
+        return Err(AppError::BadRequest(
+            "workflow must contain at least one trigger".to_owned(),
+        ));
+    }
+
+    if !workflow
+        .steps
+        .iter()
+        .any(|step| step.kind == AutomationStepKind::Action)
+    {
+        return Err(AppError::BadRequest(
+            "workflow must contain at least one action".to_owned(),
+        ));
+    }
+
+    if workflow.steps.len() > 1 && workflow.connections.is_empty() {
+        return Err(AppError::BadRequest(
+            "connect workflow steps before publishing".to_owned(),
+        ));
+    }
+
+    validate_connections(workflow, &ids)
+}
+
+fn validate_connections(workflow: &WorkflowPayload, ids: &HashSet<&str>) -> Result<(), AppError> {
+    let mut pairs = HashSet::new();
+    let steps = workflow
+        .steps
+        .iter()
+        .map(|step| (step.id.as_str(), step))
+        .collect::<HashMap<_, _>>();
+
+    for connection in &workflow.connections {
+        if !ids.contains(connection.from.as_str()) || !ids.contains(connection.to.as_str()) {
+            return Err(AppError::BadRequest(
+                "workflow connection references a missing step".to_owned(),
+            ));
+        }
+
+        if connection.from == connection.to {
+            return Err(AppError::BadRequest(
+                "workflow step cannot connect to itself".to_owned(),
+            ));
+        }
+
+        let pair = format!("{}:{}", connection.from, connection.to);
+
+        if !pairs.insert(pair) {
+            return Err(AppError::BadRequest(
+                "workflow contains duplicate connections".to_owned(),
+            ));
+        }
+
+        let Some(source) = steps.get(connection.from.as_str()) else {
+            return Err(AppError::BadRequest(
+                "workflow connection references a missing step".to_owned(),
+            ));
+        };
+        let Some(target) = steps.get(connection.to.as_str()) else {
+            return Err(AppError::BadRequest(
+                "workflow connection references a missing step".to_owned(),
+            ));
+        };
+
+        if kind_order(source.kind) > kind_order(target.kind) {
+            return Err(AppError::BadRequest(
+                "workflow steps must flow from trigger to condition to action".to_owned(),
+            ));
+        }
+    }
+
+    if has_cycle(workflow) {
+        return Err(AppError::BadRequest(
+            "workflow cannot contain loops".to_owned(),
+        ));
+    }
+
+    if workflow.steps.len() > 1 && has_disconnected_steps(workflow) {
+        return Err(AppError::BadRequest(
+            "connect all workflow steps into one executable path".to_owned(),
+        ));
+    }
+
+    Ok(())
+}
+
+fn validate_action_kind(
+    kind: AutomationStepKind,
+    action: WorkflowActionType,
+) -> Result<(), AppError> {
+    let expected = match action {
+        WorkflowActionType::TriggerPriceMoves
+        | WorkflowActionType::TriggerVolumeMoves
+        | WorkflowActionType::TriggerTimeCheck => AutomationStepKind::Trigger,
+        WorkflowActionType::ConditionOutcomePriceAbove
+        | WorkflowActionType::ConditionOutcomePriceBelow
+        | WorkflowActionType::ConditionVolumeAbove => AutomationStepKind::Condition,
+        WorkflowActionType::Buy | WorkflowActionType::Sell | WorkflowActionType::SendMessage => {
+            AutomationStepKind::Action
+        }
+    };
+
+    if kind != expected {
+        return Err(AppError::BadRequest(format!(
+            "workflow action {action:?} must use kind {expected:?}"
+        )));
+    }
+
+    Ok(())
+}
+
+fn validate_params(action: WorkflowActionType, params: &Value) -> Result<(), AppError> {
+    match action {
+        WorkflowActionType::TriggerPriceMoves => {
+            string_enum(params, "outcome", &["YES", "NO"])?;
+        }
+        WorkflowActionType::TriggerVolumeMoves => {
+            positive_number(
+                params,
+                "minimum_change_percent",
+                "minimum_change_percent must be positive",
+            )?;
+        }
+        WorkflowActionType::TriggerTimeCheck => {
+            non_empty_string(params, "interval", "interval is required")?;
+        }
+        WorkflowActionType::ConditionOutcomePriceAbove => {
+            string_enum(params, "outcome", &["YES", "NO"])?;
+            string_enum(params, "operator", &["ABOVE"])?;
+            probability(params, "price")?;
+        }
+        WorkflowActionType::ConditionOutcomePriceBelow => {
+            string_enum(params, "outcome", &["YES", "NO"])?;
+            string_enum(params, "operator", &["BELOW"])?;
+            probability(params, "price")?;
+        }
+        WorkflowActionType::ConditionVolumeAbove => {
+            string_enum(params, "operator", &["ABOVE"])?;
+            positive_number(params, "volume", "volume must be positive")?;
+        }
+        WorkflowActionType::Buy | WorkflowActionType::Sell => {
+            string_enum(params, "outcome", &["YES", "NO"])?;
+            string_enum(params, "order_type", &["MARKET", "LIMIT"])?;
+            positive_number(params, "amount", "amount must be positive")?;
+        }
+        WorkflowActionType::SendMessage => {
+            string_enum(params, "channel", &["IN_APP"])?;
+            non_empty_string(params, "message", "message is required")?;
+        }
+    }
+
+    Ok(())
+}
+
+fn has_cycle(workflow: &WorkflowPayload) -> bool {
+    let mut graph = HashMap::<&str, Vec<&str>>::new();
+
+    for step in &workflow.steps {
+        graph.insert(step.id.as_str(), Vec::new());
+    }
+
+    for connection in &workflow.connections {
+        graph
+            .entry(connection.from.as_str())
+            .or_default()
+            .push(connection.to.as_str());
+    }
+
+    let mut visiting = HashSet::new();
+    let mut visited = HashSet::new();
+
+    workflow
+        .steps
+        .iter()
+        .any(|step| visit(step.id.as_str(), &graph, &mut visiting, &mut visited))
+}
+
+fn visit<'a>(
+    id: &'a str,
+    graph: &HashMap<&'a str, Vec<&'a str>>,
+    visiting: &mut HashSet<&'a str>,
+    visited: &mut HashSet<&'a str>,
+) -> bool {
+    if visiting.contains(id) {
+        return true;
+    }
+
+    if visited.contains(id) {
+        return false;
+    }
+
+    visiting.insert(id);
+
+    for next in graph.get(id).map(Vec::as_slice).unwrap_or_default() {
+        if visit(next, graph, visiting, visited) {
+            return true;
+        }
+    }
+
+    visiting.remove(id);
+    visited.insert(id);
+    false
+}
+
+fn has_disconnected_steps(workflow: &WorkflowPayload) -> bool {
+    let mut connected = HashSet::new();
+
+    for connection in &workflow.connections {
+        connected.insert(connection.from.as_str());
+        connected.insert(connection.to.as_str());
+    }
+
+    workflow
+        .steps
+        .iter()
+        .any(|step| !connected.contains(step.id.as_str()))
+}
+
+fn is_trade_action(action: WorkflowActionType) -> bool {
+    matches!(action, WorkflowActionType::Buy | WorkflowActionType::Sell)
+}
+
+fn provider_venue(provider: AutomationProvider) -> &'static str {
+    match provider {
+        AutomationProvider::Polymarket => "polymarket",
+    }
+}
+
+fn kind_order(kind: AutomationStepKind) -> u8 {
+    match kind {
+        AutomationStepKind::Trigger => 1,
+        AutomationStepKind::Condition => 2,
+        AutomationStepKind::Action => 3,
+    }
+}
+
+fn string_enum(params: &Value, key: &str, allowed: &[&str]) -> Result<(), AppError> {
+    let Some(value) = params.get(key).and_then(Value::as_str) else {
+        return Err(AppError::BadRequest(format!("{key} is required")));
+    };
+
+    if !allowed.contains(&value) {
+        return Err(AppError::BadRequest(format!("{key} is invalid")));
+    }
+
+    Ok(())
+}
+
+fn non_empty_string(params: &Value, key: &str, message: &str) -> Result<(), AppError> {
+    let Some(value) = params.get(key).and_then(Value::as_str) else {
+        return Err(AppError::BadRequest(message.to_owned()));
+    };
+
+    if value.trim().is_empty() {
+        return Err(AppError::BadRequest(message.to_owned()));
+    }
+
+    Ok(())
+}
+
+fn positive_number(params: &Value, key: &str, message: &str) -> Result<(), AppError> {
+    let Some(value) = params.get(key).and_then(Value::as_f64) else {
+        return Err(AppError::BadRequest(message.to_owned()));
+    };
+
+    if !value.is_finite() || value <= 0.0 {
+        return Err(AppError::BadRequest(message.to_owned()));
+    }
+
+    Ok(())
+}
+
+fn probability(params: &Value, key: &str) -> Result<(), AppError> {
+    let Some(value) = params.get(key).and_then(Value::as_f64) else {
+        return Err(AppError::BadRequest(
+            "price must be between 0 and 1".to_owned(),
+        ));
+    };
+
+    if !value.is_finite() || value <= 0.0 || value >= 1.0 {
+        return Err(AppError::BadRequest(
+            "price must be between 0 and 1".to_owned(),
+        ));
+    }
+
     Ok(())
 }
 
