@@ -4,7 +4,7 @@ pub mod state;
 use axum::{
     Json, Router,
     http::{HeaderValue, Method},
-    routing::{get, post},
+    routing::{get, patch, post, put},
 };
 use tower_http::{
     cors::{AllowHeaders, AllowOrigin, CorsLayer},
@@ -20,7 +20,8 @@ use crate::{
         signup, verify_challenge, verify_email,
     },
     automations::handlers::{
-        list_alerts, list_automations, publish_automation, test_run_automation,
+        delete_automation, list_alerts, list_automations, publish_automation, test_run_automation,
+        update_automation, update_automation_status,
     },
     polymarket::handlers::{fetch_market, fetch_markets},
     response::{ApiResponse, ok},
@@ -54,6 +55,14 @@ fn api_v1_router() -> Router<AppState> {
         .route(
             "/automations",
             get(list_automations).post(publish_automation),
+        )
+        .route(
+            "/automations/{automation_id}",
+            put(update_automation).delete(delete_automation),
+        )
+        .route(
+            "/automations/{automation_id}/status",
+            patch(update_automation_status),
         )
         .route("/automations/test-run", post(test_run_automation))
         .route("/automation-alerts", get(list_alerts))

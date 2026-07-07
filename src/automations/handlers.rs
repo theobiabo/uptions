@@ -1,11 +1,15 @@
-use axum::{Json, extract::State, http::HeaderMap};
+use axum::{
+    Json,
+    extract::{Path, State},
+    http::HeaderMap,
+};
 
 use crate::{
     app::state::AppState,
     auth::handlers::bearer_token,
     automations::dto::{
         AutomationAlertResponse, AutomationResponse, PublishAutomationRequest,
-        TestRunAutomationRequest, TestRunAutomationResponse,
+        TestRunAutomationRequest, TestRunAutomationResponse, UpdateAutomationStatusRequest,
     },
     error::{AppError, ErrorResponse},
     response::{ApiResponse, ok},
@@ -50,6 +54,93 @@ pub async fn publish_automation(
     let user_id = authenticated_user_id(&state, &headers).await?;
     let automation = state.automation_service.publish(&user_id, payload).await?;
     Ok(ok("Automation published successfully", automation))
+}
+
+#[utoipa::path(
+    put,
+    path = "/api/v1/automations/{automation_id}",
+    tag = "Builder",
+    security(("bearer_auth" = [])),
+    params(
+        ("automation_id" = String, Path, description = "Automation id")
+    ),
+    request_body = PublishAutomationRequest,
+    responses(
+        (status = 200, description = "Automation updated successfully", body = ApiResponse<AutomationResponse>),
+        (status = 400, description = "Invalid automation payload", body = ErrorResponse),
+        (status = 401, description = "Missing or invalid bearer token", body = ErrorResponse),
+        (status = 404, description = "Automation not found", body = ErrorResponse)
+    )
+)]
+pub async fn update_automation(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(automation_id): Path<String>,
+    Json(payload): Json<PublishAutomationRequest>,
+) -> Result<Json<ApiResponse<AutomationResponse>>, AppError> {
+    let user_id = authenticated_user_id(&state, &headers).await?;
+    let automation = state
+        .automation_service
+        .update(&user_id, &automation_id, payload)
+        .await?;
+    Ok(ok("Automation updated successfully", automation))
+}
+
+#[utoipa::path(
+    patch,
+    path = "/api/v1/automations/{automation_id}/status",
+    tag = "Builder",
+    security(("bearer_auth" = [])),
+    params(
+        ("automation_id" = String, Path, description = "Automation id")
+    ),
+    request_body = UpdateAutomationStatusRequest,
+    responses(
+        (status = 200, description = "Automation status updated", body = ApiResponse<AutomationResponse>),
+        (status = 400, description = "Invalid automation status", body = ErrorResponse),
+        (status = 401, description = "Missing or invalid bearer token", body = ErrorResponse),
+        (status = 404, description = "Automation not found", body = ErrorResponse)
+    )
+)]
+pub async fn update_automation_status(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(automation_id): Path<String>,
+    Json(payload): Json<UpdateAutomationStatusRequest>,
+) -> Result<Json<ApiResponse<AutomationResponse>>, AppError> {
+    let user_id = authenticated_user_id(&state, &headers).await?;
+    let automation = state
+        .automation_service
+        .set_status(&user_id, &automation_id, payload.status)
+        .await?;
+    Ok(ok("Automation status updated", automation))
+}
+
+#[utoipa::path(
+    delete,
+    path = "/api/v1/automations/{automation_id}",
+    tag = "Builder",
+    security(("bearer_auth" = [])),
+    params(
+        ("automation_id" = String, Path, description = "Automation id")
+    ),
+    responses(
+        (status = 200, description = "Automation deleted successfully", body = ApiResponse<String>),
+        (status = 401, description = "Missing or invalid bearer token", body = ErrorResponse),
+        (status = 404, description = "Automation not found", body = ErrorResponse)
+    )
+)]
+pub async fn delete_automation(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(automation_id): Path<String>,
+) -> Result<Json<ApiResponse<String>>, AppError> {
+    let user_id = authenticated_user_id(&state, &headers).await?;
+    state
+        .automation_service
+        .delete(&user_id, &automation_id)
+        .await?;
+    Ok(ok("Automation deleted successfully", "ok".to_owned()))
 }
 
 #[utoipa::path(
