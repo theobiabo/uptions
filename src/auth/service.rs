@@ -280,6 +280,10 @@ impl AuthService {
         })
     }
 
+    pub async fn current_user_id(&self, access_token: &str) -> Result<String, AppError> {
+        Ok(self.session(access_token).await?.user_id)
+    }
+
     pub async fn current_user(&self, access_token: &str) -> Result<AuthUserResponse, AppError> {
         let session = self.session(access_token).await?;
         let user = user::Entity::find_by_id(&session.user_id)

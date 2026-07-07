@@ -1,5 +1,6 @@
 use crate::{
     auth::service::AuthService,
+    automations::service::AutomationService,
     config::AppConfig,
     db::{Db, connect},
     polymarket::client::PolymarketClient,
@@ -12,6 +13,7 @@ use sea_orm_migration::MigratorTrait;
 #[derive(Clone)]
 pub struct AppState {
     pub auth_service: AuthService,
+    pub automation_service: AutomationService,
     pub db: Db,
     pub polymarket_client: PolymarketClient,
     pub user_service: UserService,
@@ -28,6 +30,7 @@ impl AppState {
                 config.credential_encryption_key.clone(),
                 config.app_base_url.clone(),
             ),
+            automation_service: AutomationService::new(db.clone()),
             db: db.clone(),
             polymarket_client: PolymarketClient::new(&config),
             user_service: UserService::new(db),

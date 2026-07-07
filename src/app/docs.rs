@@ -1,11 +1,8 @@
-use axum::{
-    Json,
-    response::{Html, IntoResponse},
-};
 use utoipa::{
     Modify, OpenApi,
     openapi::security::{Http, HttpAuthScheme, SecurityScheme},
 };
+use utoipa_swagger_ui::SwaggerUi;
 
 use crate::{
     auth::dto::{
@@ -13,6 +10,11 @@ use crate::{
         CreateChallengeResponse, ForgotPasswordRequest, LoginRequest, ResetPasswordRequest,
         SignupRequest, VenueConnectionResponse, VerifyChallengeRequest, VerifyChallengeResponse,
         VerifyEmailRequest,
+    },
+    automations::dto::{
+        AutomationAlertResponse, AutomationResponse, PublishAutomationRequest,
+        TestRunAutomationRequest, TestRunAutomationResponse, WorkflowBlockPayload,
+        WorkflowEdgePayload, WorkflowNodePayload, WorkflowPayload, WorkflowPositionPayload,
     },
     error::ErrorResponse,
     polymarket::dto::MarketsQuery,
@@ -33,6 +35,10 @@ use crate::{
         crate::auth::handlers::verify_challenge,
         crate::auth::handlers::current_user,
         crate::auth::handlers::connect_polymarket,
+        crate::automations::handlers::list_automations,
+        crate::automations::handlers::publish_automation,
+        crate::automations::handlers::test_run_automation,
+        crate::automations::handlers::list_alerts,
         crate::polymarket::handlers::fetch_markets,
         crate::polymarket::handlers::fetch_market,
         crate::users::handler::join_waitlist
@@ -41,8 +47,14 @@ use crate::{
         schemas(
             AuthUserResponse,
             AuthSessionResponse,
+            AutomationAlertResponse,
+            AutomationResponse,
             ApiResponse<AuthUserResponse>,
             ApiResponse<AuthSessionResponse>,
+            ApiResponse<AutomationResponse>,
+            ApiResponse<TestRunAutomationResponse>,
+            ApiResponse<Vec<AutomationAlertResponse>>,
+            ApiResponse<Vec<AutomationResponse>>,
             ApiResponse<CreateChallengeResponse>,
             ApiResponse<String>,
             ApiResponse<VenueConnectionResponse>,
@@ -55,8 +67,16 @@ use crate::{
             ForgotPasswordRequest,
             LoginRequest,
             MarketsQuery,
+            PublishAutomationRequest,
             ResetPasswordRequest,
             SignupRequest,
+            TestRunAutomationRequest,
+            TestRunAutomationResponse,
+            WorkflowBlockPayload,
+            WorkflowEdgePayload,
+            WorkflowNodePayload,
+            WorkflowPayload,
+            WorkflowPositionPayload,
             VenueConnectionResponse,
             VerifyChallengeRequest,
             VerifyChallengeResponse,
@@ -69,37 +89,13 @@ use crate::{
     info(
         title = "Uptions Backend API",
         version = "1.0.0",
-        description = "Versioned V1 backend endpoints for Uptions identity, venue connections, and market discovery."
+        description = "Versioned V1 backend endpoints for Uptions identity, venue connections, market discovery, and automation workflows."
     )
 )]
 struct ApiDoc;
 
-pub async fn openapi_json() -> impl IntoResponse {
-    Json(ApiDoc::openapi())
-}
-
-pub async fn swagger_ui() -> impl IntoResponse {
-    Html(
-        r##"<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Uptions API Documentation</title>
-  <link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist@5/swagger-ui.css" />
-</head>
-<body>
-  <div id="swagger-ui"></div>
-  <script src="https://unpkg.com/swagger-ui-dist@5/swagger-ui-bundle.js"></script>
-  <script>
-    window.ui = SwaggerUIBundle({
-      url: "/docs/openapi.json",
-      dom_id: "#swagger-ui"
-    });
-  </script>
-</body>
-</html>"##,
-    )
+pub fn swagger_ui() -> SwaggerUi {
+    SwaggerUi::new("/docs").url("/docs/openapi.json", ApiDoc::openapi())
 }
 
 struct SecurityAddon;

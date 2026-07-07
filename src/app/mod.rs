@@ -13,11 +13,14 @@ use tower_http::{
 use tracing::Level;
 
 use crate::{
-    app::docs::{openapi_json, swagger_ui},
+    app::docs::swagger_ui,
     app::state::AppState,
     auth::handlers::{
         connect_polymarket, create_challenge, current_user, forgot_password, login, reset_password,
         signup, verify_challenge, verify_email,
+    },
+    automations::handlers::{
+        list_alerts, list_automations, publish_automation, test_run_automation,
     },
     polymarket::handlers::{fetch_market, fetch_markets},
     response::{ApiResponse, ok},
@@ -48,6 +51,12 @@ fn api_v1_router() -> Router<AppState> {
         .route("/auth/verify", post(verify_challenge))
         .route("/auth/me", get(current_user))
         .route("/venue-connections/polymarket", post(connect_polymarket))
+        .route(
+            "/automations",
+            get(list_automations).post(publish_automation),
+        )
+        .route("/automations/test-run", post(test_run_automation))
+        .route("/automation-alerts", get(list_alerts))
         .route("/polymarket/markets", get(fetch_markets))
         .route("/polymarket/markets/{market_id}", get(fetch_market))
         .route("/users/waitlist", post(join_waitlist))
@@ -100,8 +109,7 @@ fn cors_layer() -> CorsLayer {
 pub fn create_app(state: AppState) -> Router {
     Router::new()
         .route("/", get(health_check))
-        .route("/docs", get(swagger_ui))
-        .route("/docs/openapi.json", get(openapi_json))
+        .merge(swagger_ui())
         .nest("/api/v1", api_v1_router())
         .layer(
             TraceLayer::new_for_http()

@@ -1,5 +1,6 @@
 pub mod app;
 pub mod auth;
+pub mod automations;
 pub mod config;
 pub mod db;
 pub mod entities;
