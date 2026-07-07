@@ -3,6 +3,8 @@ use axum::{
     extract::{Path, State, rejection::JsonRejection},
     http::HeaderMap,
 };
+use serde::de::DeserializeOwned;
+use serde_json::Value;
 
 use crate::{
     app::state::AppState,
@@ -49,9 +51,9 @@ pub async fn list_automations(
 pub async fn publish_automation(
     State(state): State<AppState>,
     headers: HeaderMap,
-    payload: Result<Json<PublishAutomationRequest>, JsonRejection>,
+    payload: Result<Json<Value>, JsonRejection>,
 ) -> Result<Json<ApiResponse<AutomationResponse>>, AppError> {
-    let payload = parse_json(payload, "Invalid automation payload")?;
+    let payload: PublishAutomationRequest = parse_payload(payload, "Invalid automation payload")?;
     let user_id = authenticated_user_id(&state, &headers).await?;
     let automation = state.automation_service.publish(&user_id, payload).await?;
     Ok(ok("Automation published successfully", automation))
@@ -77,9 +79,9 @@ pub async fn update_automation(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(automation_id): Path<String>,
-    payload: Result<Json<PublishAutomationRequest>, JsonRejection>,
+    payload: Result<Json<Value>, JsonRejection>,
 ) -> Result<Json<ApiResponse<AutomationResponse>>, AppError> {
-    let payload = parse_json(payload, "Invalid automation payload")?;
+    let payload: PublishAutomationRequest = parse_payload(payload, "Invalid automation payload")?;
     let user_id = authenticated_user_id(&state, &headers).await?;
     let automation = state
         .automation_service
@@ -108,9 +110,10 @@ pub async fn update_automation_status(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(automation_id): Path<String>,
-    payload: Result<Json<UpdateAutomationStatusRequest>, JsonRejection>,
+    payload: Result<Json<Value>, JsonRejection>,
 ) -> Result<Json<ApiResponse<AutomationResponse>>, AppError> {
-    let payload = parse_json(payload, "Invalid automation status payload")?;
+    let payload: UpdateAutomationStatusRequest =
+        parse_payload(payload, "Invalid automation status payload")?;
     let user_id = authenticated_user_id(&state, &headers).await?;
     let automation = state
         .automation_service
@@ -161,9 +164,9 @@ pub async fn delete_automation(
 pub async fn test_run_automation(
     State(state): State<AppState>,
     headers: HeaderMap,
-    payload: Result<Json<TestRunAutomationRequest>, JsonRejection>,
+    payload: Result<Json<Value>, JsonRejection>,
 ) -> Result<Json<ApiResponse<TestRunAutomationResponse>>, AppError> {
-    let payload = parse_json(payload, "Invalid test run payload")?;
+    let payload: TestRunAutomationRequest = parse_payload(payload, "Invalid test run payload")?;
     let user_id = authenticated_user_id(&state, &headers).await?;
     let result = state.automation_service.test_run(&user_id, payload).await?;
     Ok(ok("Automation test run completed", result))
@@ -188,10 +191,19 @@ pub async fn list_alerts(
     Ok(ok("Automation alerts fetched successfully", alerts))
 }
 
-fn parse_json<T>(payload: Result<Json<T>, JsonRejection>, message: &str) -> Result<T, AppError> {
-    payload
+fn parse_payload<T>(
+    payload: Result<Json<Value>, JsonRejection>,
+    message: &str,
+) -> Result<T, AppError>
+where
+    T: DeserializeOwned,
+{
+    let value = payload
         .map(|Json(payload)| payload)
-        .map_err(|error| AppError::BadRequest(format!("{message}: {}", error.body_text())))
+        .map_err(|error| AppError::BadRequest(format!("{message}: {}", error.body_text())))?;
+
+    serde_json::from_value(value)
+        .map_err(|error| AppError::BadRequest(format!("{message}: {error}")))
 }
 
 async fn authenticated_user_id(state: &AppState, headers: &HeaderMap) -> Result<String, AppError> {
