@@ -14,7 +14,7 @@ use crate::{
         AutomationProvider, AutomationStatus, PublishAutomationRequest, TestRunAutomationRequest,
         WorkflowActionType,
     },
-    entities::{mcp_approval_request, venue_connection},
+    entities::{automation_alert, mcp_approval_request, venue_connection},
     error::AppError,
     mcp::dto::{
         AutomationIdPayload, AutomationToolPayload, MarketIdPayload, McpApprovalDecisionResponse,
@@ -422,6 +422,7 @@ pub async fn approve_request(
     active.decided_at = Set(Some(now.into()));
     let approval = active.update(&state.db).await?;
     let response = approval_response(approval);
+    mark_approval_alert_decided(state, user_id, &response.id, "approved").await?;
 
     state
         .automation_service
@@ -461,6 +462,7 @@ pub async fn reject_request(
     active.decided_at = Set(Some(now.into()));
     let approval = active.update(&state.db).await?;
     let response = approval_response(approval);
+    mark_approval_alert_decided(state, user_id, &response.id, "rejected").await?;
 
     state
         .automation_service
@@ -636,6 +638,50 @@ async fn find_pending_approval(
     }
 
     Ok(approval)
+}
+
+async fn mark_approval_alert_decided(
+    state: &AppState,
+    user_id: &str,
+    approval_id: &str,
+    status: &str,
+) -> Result<(), AppError> {
+    let alerts = automation_alert::Entity::find()
+        .filter(automation_alert::Column::UserId.eq(user_id))
+        .all(&state.db)
+        .await?;
+
+    for alert in alerts {
+        let matches_approval = alert
+            .meta
+            .get("approval_id")
+            .and_then(Value::as_str)
+            .is_some_and(|value| value == approval_id);
+        let matches_type = alert
+            .meta
+            .get("type")
+            .and_then(Value::as_str)
+            .is_some_and(|value| value == "mcp_approval_requested");
+
+        if matches_approval && matches_type {
+            let mut meta = alert.meta.clone();
+
+            if let Some(object) = meta.as_object_mut() {
+                object.insert(
+                    "approval_status".to_owned(),
+                    Value::String(status.to_owned()),
+                );
+            }
+
+            let mut active = alert.into_active_model();
+            active.status = Set(status.to_owned());
+            active.meta = Set(meta);
+            active.read_at = Set(Some(Utc::now().into()));
+            active.update(&state.db).await?;
+        }
+    }
+
+    Ok(())
 }
 
 fn approval_response(model: mcp_approval_request::Model) -> McpApprovalResponse {
