@@ -50,6 +50,16 @@ impl AutomationService {
         Ok(alerts.into_iter().map(alert_response).collect())
     }
 
+    pub async fn get(
+        &self,
+        user_id: &str,
+        automation_id: &str,
+    ) -> Result<AutomationResponse, AppError> {
+        let model = self.find_owned_automation(user_id, automation_id).await?;
+
+        Ok(automation_response(model))
+    }
+
     pub async fn update(
         &self,
         user_id: &str,
@@ -69,7 +79,7 @@ impl AutomationService {
         active.title = Set(title);
         active.market_id = Set(Some(market_id));
         active.market_title = Set(Some(market_title));
-        active.venue = Set(provider_venue(payload.provider).to_owned());
+        active.venue = Set(payload.provider.venue_id().to_owned());
         active.workflow = Set(workflow);
         active.status = Set("active".to_owned());
         active.updated_at = Set(Utc::now().into());
@@ -111,7 +121,7 @@ impl AutomationService {
         let title = clean_title(&payload.title)?;
         let market_id = clean_required(&payload.market.id, "market id is required")?;
         let market_title = clean_required(&payload.market.title, "market title is required")?;
-        let venue = provider_venue(payload.provider).to_owned();
+        let venue = payload.provider.venue_id().to_owned();
         let workflow = serde_json::to_value(&payload.workflow)
             .map_err(|error| AppError::BadRequest(error.to_string()))?;
         let now = Utc::now();
@@ -226,7 +236,7 @@ impl AutomationService {
 
         let connection = venue_connection::Entity::find()
             .filter(venue_connection::Column::UserId.eq(user_id))
-            .filter(venue_connection::Column::Venue.eq(provider_venue(provider)))
+            .filter(venue_connection::Column::Venue.eq(provider.venue_id()))
             .filter(venue_connection::Column::Enabled.eq(true))
             .filter(venue_connection::Column::Status.eq("active"))
             .one(&self.db)
@@ -520,12 +530,6 @@ fn has_disconnected_steps(workflow: &WorkflowPayload) -> bool {
 
 fn is_trade_action(action: WorkflowActionType) -> bool {
     matches!(action, WorkflowActionType::Buy | WorkflowActionType::Sell)
-}
-
-fn provider_venue(provider: AutomationProvider) -> &'static str {
-    match provider {
-        AutomationProvider::Polymarket => "polymarket",
-    }
 }
 
 fn kind_order(kind: AutomationStepKind) -> u8 {

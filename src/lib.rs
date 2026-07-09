@@ -6,6 +6,7 @@ pub mod db;
 pub mod entities;
 pub mod error;
 pub mod libs;
+pub mod mcp;
 pub mod polymarket;
 pub mod response;
 pub mod users;
