@@ -10,8 +10,9 @@ use crate::{
     app::state::AppState,
     auth::handlers::bearer_token,
     automations::dto::{
-        AutomationAlertResponse, AutomationResponse, PublishAutomationRequest,
-        TestRunAutomationRequest, TestRunAutomationResponse, UpdateAutomationStatusRequest,
+        AutomationAlertResponse, AutomationResponse, MarkAlertsReadResponse,
+        PublishAutomationRequest, TestRunAutomationRequest, TestRunAutomationResponse,
+        UpdateAutomationStatusRequest,
     },
     error::{AppError, ErrorResponse},
     response::{ApiResponse, ok},
@@ -189,6 +190,57 @@ pub async fn list_alerts(
     let user_id = authenticated_user_id(&state, &headers).await?;
     let alerts = state.automation_service.alerts(&user_id).await?;
     Ok(ok("Automation alerts fetched successfully", alerts))
+}
+
+#[utoipa::path(
+    patch,
+    path = "/api/v1/automation-alerts/read",
+    tag = "Builder",
+    security(("bearer_auth" = [])),
+    responses(
+        (status = 200, description = "Automation alerts marked as read", body = ApiResponse<MarkAlertsReadResponse>),
+        (status = 401, description = "Missing or invalid bearer token", body = ErrorResponse)
+    )
+)]
+pub async fn mark_alerts_read(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<ApiResponse<MarkAlertsReadResponse>>, AppError> {
+    let user_id = authenticated_user_id(&state, &headers).await?;
+    let updated = state.automation_service.mark_alerts_read(&user_id).await?;
+
+    Ok(ok(
+        "Automation alerts marked as read",
+        MarkAlertsReadResponse { updated },
+    ))
+}
+
+#[utoipa::path(
+    patch,
+    path = "/api/v1/automation-alerts/{alert_id}/read",
+    tag = "Builder",
+    security(("bearer_auth" = [])),
+    params(
+        ("alert_id" = String, Path, description = "Automation alert id")
+    ),
+    responses(
+        (status = 200, description = "Automation alert marked as read", body = ApiResponse<AutomationAlertResponse>),
+        (status = 401, description = "Missing or invalid bearer token", body = ErrorResponse),
+        (status = 404, description = "Automation alert not found", body = ErrorResponse)
+    )
+)]
+pub async fn mark_alert_read(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(alert_id): Path<String>,
+) -> Result<Json<ApiResponse<AutomationAlertResponse>>, AppError> {
+    let user_id = authenticated_user_id(&state, &headers).await?;
+    let alert = state
+        .automation_service
+        .mark_alert_read(&user_id, &alert_id)
+        .await?;
+
+    Ok(ok("Automation alert marked as read", alert))
 }
 
 fn parse_payload<T>(

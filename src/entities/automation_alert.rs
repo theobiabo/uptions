@@ -13,6 +13,7 @@ pub struct Model {
     pub status: String,
     pub meta: Value,
     pub created_at: DateTimeWithTimeZone,
+    pub read_at: Option<DateTimeWithTimeZone>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

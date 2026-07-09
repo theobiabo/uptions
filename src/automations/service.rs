@@ -17,16 +17,18 @@ use crate::{
     db::Db,
     entities::{automation, automation_alert, venue_connection},
     error::AppError,
+    notifications::{dto::AutomationAlertStreamEvent, service::NotificationService},
 };
 
 #[derive(Clone)]
 pub struct AutomationService {
     db: Db,
+    notifications: NotificationService,
 }
 
 impl AutomationService {
-    pub fn new(db: Db) -> Self {
-        Self { db }
+    pub fn new(db: Db, notifications: NotificationService) -> Self {
+        Self { db, notifications }
     }
 
     pub async fn list(&self, user_id: &str) -> Result<Vec<AutomationResponse>, AppError> {
@@ -48,6 +50,47 @@ impl AutomationService {
             .await?;
 
         Ok(alerts.into_iter().map(alert_response).collect())
+    }
+
+    pub async fn mark_alert_read(
+        &self,
+        user_id: &str,
+        alert_id: &str,
+    ) -> Result<AutomationAlertResponse, AppError> {
+        let alert_id = clean_required(alert_id, "alert id is required")?;
+        let model = automation_alert::Entity::find_by_id(alert_id)
+            .filter(automation_alert::Column::UserId.eq(user_id))
+            .one(&self.db)
+            .await?
+            .ok_or_else(|| AppError::NotFound("notification not found".to_owned()))?;
+
+        if model.read_at.is_some() {
+            return Ok(alert_response(model));
+        }
+
+        let mut active = model.into_active_model();
+        active.read_at = Set(Some(Utc::now().into()));
+        let model = active.update(&self.db).await?;
+
+        Ok(alert_response(model))
+    }
+
+    pub async fn mark_alerts_read(&self, user_id: &str) -> Result<u64, AppError> {
+        let alerts = automation_alert::Entity::find()
+            .filter(automation_alert::Column::UserId.eq(user_id))
+            .filter(automation_alert::Column::ReadAt.is_null())
+            .all(&self.db)
+            .await?;
+        let updated = alerts.len() as u64;
+        let read_at = Utc::now();
+
+        for model in alerts {
+            let mut active = model.into_active_model();
+            active.read_at = Set(Some(read_at.into()));
+            active.update(&self.db).await?;
+        }
+
+        Ok(updated)
     }
 
     pub async fn get(
@@ -84,8 +127,23 @@ impl AutomationService {
         active.status = Set("active".to_owned());
         active.updated_at = Set(Utc::now().into());
         let model = active.update(&self.db).await?;
+        let response = automation_response(model);
+        self.create_alert(
+            user_id,
+            Some(response.id.clone()),
+            "Automation updated",
+            &format!("{} was updated and is ready to run.", response.title),
+            "success",
+            json!({
+                "type": "automation_updated",
+                "automation_id": response.id.clone(),
+                "market_id": response.market_id.clone(),
+                "venue": response.venue.clone()
+            }),
+        )
+        .await?;
 
-        Ok(automation_response(model))
+        Ok(response)
     }
 
     pub async fn set_status(
@@ -99,13 +157,48 @@ impl AutomationService {
         active.status = Set(status.as_str().to_owned());
         active.updated_at = Set(Utc::now().into());
         let model = active.update(&self.db).await?;
+        let response = automation_response(model);
+        let action = match status {
+            AutomationStatus::Active => "resumed",
+            AutomationStatus::Paused => "paused",
+        };
+        self.create_alert(
+            user_id,
+            Some(response.id.clone()),
+            &format!("Automation {action}"),
+            &format!("{} was {action}.", response.title),
+            "info",
+            json!({
+                "type": format!("automation_{action}"),
+                "automation_id": response.id.clone(),
+                "market_id": response.market_id.clone(),
+                "status": response.status.clone()
+            }),
+        )
+        .await?;
 
-        Ok(automation_response(model))
+        Ok(response)
     }
 
     pub async fn delete(&self, user_id: &str, automation_id: &str) -> Result<(), AppError> {
         let model = self.find_owned_automation(user_id, automation_id).await?;
+        let deleted_id = model.id.clone();
+        let deleted_title = model.title.clone();
+        let market_id = model.market_id.clone();
         model.into_active_model().delete(&self.db).await?;
+        self.create_alert(
+            user_id,
+            None,
+            "Automation deleted",
+            &format!("{deleted_title} was deleted."),
+            "info",
+            json!({
+                "type": "automation_deleted",
+                "automation_id": deleted_id,
+                "market_id": market_id
+            }),
+        )
+        .await?;
 
         Ok(())
     }
@@ -141,8 +234,23 @@ impl AutomationService {
         }
         .insert(&self.db)
         .await?;
+        let response = automation_response(model);
+        self.create_alert(
+            user_id,
+            Some(response.id.clone()),
+            "Automation published",
+            &format!("{} was published and is ready to run.", response.title),
+            "success",
+            json!({
+                "type": "automation_published",
+                "automation_id": response.id.clone(),
+                "market_id": response.market_id.clone(),
+                "venue": response.venue.clone()
+            }),
+        )
+        .await?;
 
-        Ok(automation_response(model))
+        Ok(response)
     }
 
     pub async fn test_run(
@@ -269,11 +377,15 @@ impl AutomationService {
             status: Set(status.to_owned()),
             meta: Set(meta),
             created_at: Set(Utc::now().into()),
+            read_at: Set(None),
         }
         .insert(&self.db)
         .await?;
+        let alert = alert_response(alert);
+        self.notifications
+            .publish_alert(user_id, stream_alert_response(&alert));
 
-        Ok(alert_response(alert))
+        Ok(alert)
     }
 }
 
@@ -636,5 +748,20 @@ fn alert_response(model: automation_alert::Model) -> AutomationAlertResponse {
         status: model.status,
         meta: model.meta,
         created_at: model.created_at.to_rfc3339(),
+        read_at: model.read_at.map(|value| value.to_rfc3339()),
+    }
+}
+
+fn stream_alert_response(alert: &AutomationAlertResponse) -> AutomationAlertStreamEvent {
+    AutomationAlertStreamEvent {
+        automation_id: alert.automation_id.clone(),
+        created_at: alert.created_at.clone(),
+        event_type: "automation_alert".to_owned(),
+        id: alert.id.clone(),
+        message: alert.message.clone(),
+        meta: alert.meta.clone(),
+        read_at: alert.read_at.clone(),
+        status: alert.status.clone(),
+        title: alert.title.clone(),
     }
 }

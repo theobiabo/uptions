@@ -20,10 +20,11 @@ use crate::{
         signup, verify_challenge, verify_email,
     },
     automations::handlers::{
-        delete_automation, list_alerts, list_automations, publish_automation, test_run_automation,
-        update_automation, update_automation_status,
+        delete_automation, list_alerts, list_automations, mark_alert_read, mark_alerts_read,
+        publish_automation, test_run_automation, update_automation, update_automation_status,
     },
     mcp::handlers::handle_mcp,
+    notifications::handlers::stream_alerts,
     polymarket::handlers::{fetch_market, fetch_markets},
     response::{ApiResponse, ok},
     users::handler::join_waitlist,
@@ -67,6 +68,9 @@ fn api_v1_router() -> Router<AppState> {
         )
         .route("/automations/test-run", post(test_run_automation))
         .route("/automation-alerts", get(list_alerts))
+        .route("/automation-alerts/read", patch(mark_alerts_read))
+        .route("/automation-alerts/{alert_id}/read", patch(mark_alert_read))
+        .route("/automation-alerts/stream", get(stream_alerts))
         .route("/polymarket/markets", get(fetch_markets))
         .route("/polymarket/markets/{market_id}", get(fetch_market))
         .route("/users/waitlist", post(join_waitlist))

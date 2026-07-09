@@ -11,6 +11,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260609_000001_email_auth_and_sessions::Migration),
             Box::new(m20260610_000001_email_verification_and_password_reset::Migration),
             Box::new(m20260707_000001_automations::Migration),
+            Box::new(m20260709_000001_automation_alert_reads::Migration),
         ]
     }
 }
@@ -19,3 +20,4 @@ mod m20260601_000001_identity_and_venue_connections;
 mod m20260609_000001_email_auth_and_sessions;
 mod m20260610_000001_email_verification_and_password_reset;
 mod m20260707_000001_automations;
+mod m20260709_000001_automation_alert_reads;

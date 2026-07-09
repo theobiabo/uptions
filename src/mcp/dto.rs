@@ -1,10 +1,35 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
+use utoipa::ToSchema;
 
 use crate::{
     automations::dto::{AutomationMarketPayload, WorkflowActionType, WorkflowPayload},
     polymarket::dto::MarketsQuery,
 };
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct McpJsonRpcRequest {
+    #[schema(example = "2.0")]
+    pub jsonrpc: Option<String>,
+    #[schema(value_type = Object)]
+    pub id: Option<Value>,
+    #[schema(example = "tools/list")]
+    pub method: String,
+    #[schema(value_type = Object)]
+    pub params: Option<Value>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct McpJsonRpcResponse {
+    #[schema(example = "2.0")]
+    pub jsonrpc: String,
+    #[schema(value_type = Object)]
+    pub id: Value,
+    #[schema(value_type = Object)]
+    pub result: Option<Value>,
+    #[schema(value_type = Object)]
+    pub error: Option<Value>,
+}
 
 #[derive(Debug, Deserialize)]
 pub struct McpRequest {

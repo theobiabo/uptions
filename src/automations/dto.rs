@@ -242,6 +242,14 @@ pub struct AutomationAlertResponse {
     pub meta: Value,
     #[schema(example = "2026-07-07T12:30:00Z")]
     pub created_at: String,
+    #[schema(example = "2026-07-07T12:35:00Z")]
+    pub read_at: Option<String>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct MarkAlertsReadResponse {
+    #[schema(example = 3)]
+    pub updated: u64,
 }
 
 #[derive(Debug, Serialize, ToSchema)]

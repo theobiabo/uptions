@@ -5,8 +5,25 @@ use axum::{
 };
 use serde_json::{Value, json};
 
-use crate::{app::state::AppState, mcp::service::handle_message};
+use crate::{
+    app::state::AppState,
+    error::ErrorResponse,
+    mcp::{
+        dto::{McpJsonRpcRequest, McpJsonRpcResponse},
+        service::handle_message,
+    },
+};
 
+#[utoipa::path(
+    post,
+    path = "/api/v1/mcp",
+    tag = "MCP",
+    request_body = McpJsonRpcRequest,
+    responses(
+        (status = 200, description = "MCP JSON-RPC response", body = McpJsonRpcResponse),
+        (status = 400, description = "Invalid JSON-RPC payload", body = ErrorResponse)
+    )
+)]
 pub async fn handle_mcp(
     State(state): State<AppState>,
     headers: HeaderMap,
