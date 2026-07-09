@@ -8,6 +8,26 @@ pub enum AutomationProvider {
     Polymarket,
 }
 
+impl AutomationProvider {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Polymarket => "Polymarket",
+        }
+    }
+
+    pub fn venue_id(self) -> &'static str {
+        match self {
+            Self::Polymarket => "polymarket",
+        }
+    }
+}
+
+impl Default for AutomationProvider {
+    fn default() -> Self {
+        Self::Polymarket
+    }
+}
+
 impl<'de> Deserialize<'de> for AutomationProvider {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
@@ -125,6 +145,7 @@ pub struct PublishAutomationRequest {
     #[schema(example = "New Playboi Carti Album before GTA VI?")]
     pub title: String,
     pub market: AutomationMarketPayload,
+    #[serde(default)]
     pub provider: AutomationProvider,
     pub workflow: WorkflowPayload,
 }
@@ -172,6 +193,7 @@ pub struct TestRunAutomationRequest {
     #[schema(example = "New Playboi Carti Album before GTA VI?")]
     pub title: String,
     pub market: AutomationMarketPayload,
+    #[serde(default)]
     pub provider: AutomationProvider,
     pub workflow: WorkflowPayload,
 }
@@ -220,6 +242,14 @@ pub struct AutomationAlertResponse {
     pub meta: Value,
     #[schema(example = "2026-07-07T12:30:00Z")]
     pub created_at: String,
+    #[schema(example = "2026-07-07T12:35:00Z")]
+    pub read_at: Option<String>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct MarkAlertsReadResponse {
+    #[schema(example = 3)]
+    pub updated: u64,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -305,6 +335,49 @@ mod tests {
         let request: UpdateAutomationStatusRequest = serde_json::from_value(payload).unwrap();
 
         assert_eq!(request.status, AutomationStatus::Paused);
+    }
+
+    #[test]
+    fn defaults_provider_when_omitted() {
+        let payload = serde_json::json!({
+            "title": "Backend default provider",
+            "market": {
+                "id": "540818",
+                "title": "Backend default provider"
+            },
+            "workflow": {
+                "version": 1,
+                "steps": [
+                    {
+                        "id": "price-moves-abc",
+                        "kind": "TRIGGER",
+                        "action": "TRIGGER_PRICE_MOVES",
+                        "params": {
+                            "outcome": "YES"
+                        }
+                    },
+                    {
+                        "id": "send-message-def",
+                        "kind": "ACTION",
+                        "action": "SEND_MESSAGE",
+                        "params": {
+                            "channel": "IN_APP",
+                            "message": "Market condition met"
+                        }
+                    }
+                ],
+                "connections": [
+                    {
+                        "from": "price-moves-abc",
+                        "to": "send-message-def"
+                    }
+                ]
+            }
+        });
+
+        let request: PublishAutomationRequest = serde_json::from_value(payload).unwrap();
+
+        assert_eq!(request.provider, AutomationProvider::Polymarket);
     }
 
     #[test]

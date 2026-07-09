@@ -26,6 +26,7 @@ use crate::{
         ForgotPasswordRequest, LoginRequest, ResetPasswordRequest, SignupRequest,
         VenueConnectionResponse, VerifyChallengeResponse,
     },
+    automations::dto::AutomationProvider,
     db::Db,
     entities::{auth_method, user, user_session, venue_connection},
     error::AppError,
@@ -338,9 +339,10 @@ impl AuthService {
         });
         let config = encrypt_json(&self.credential_encryption_key, &credential_config)?;
 
+        let provider = AutomationProvider::Polymarket;
         let existing = venue_connection::Entity::find()
             .filter(venue_connection::Column::UserId.eq(&session.user_id))
-            .filter(venue_connection::Column::Venue.eq("polymarket"))
+            .filter(venue_connection::Column::Venue.eq(provider.venue_id()))
             .one(&self.db)
             .await?;
 
@@ -360,7 +362,7 @@ impl AuthService {
                 venue_connection::ActiveModel {
                     id: Set(Uuid::new_v4().to_string()),
                     user_id: Set(session.user_id),
-                    venue: Set("polymarket".to_owned()),
+                    venue: Set(provider.venue_id().to_owned()),
                     account_identifier: Set(account_identifier),
                     auth_type: Set("api_key".to_owned()),
                     config: Set(config),
