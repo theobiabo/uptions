@@ -93,6 +93,20 @@ impl AutomationService {
         Ok(updated)
     }
 
+    pub async fn clear_alerts(&self, user_id: &str) -> Result<u64, AppError> {
+        let alerts = automation_alert::Entity::find()
+            .filter(automation_alert::Column::UserId.eq(user_id))
+            .all(&self.db)
+            .await?;
+        let deleted = alerts.len() as u64;
+
+        for model in alerts {
+            model.into_active_model().delete(&self.db).await?;
+        }
+
+        Ok(deleted)
+    }
+
     pub async fn get(
         &self,
         user_id: &str,
@@ -359,7 +373,7 @@ impl AutomationService {
         Ok(())
     }
 
-    async fn create_alert(
+    pub async fn create_alert(
         &self,
         user_id: &str,
         automation_id: Option<String>,

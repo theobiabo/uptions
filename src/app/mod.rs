@@ -20,10 +20,13 @@ use crate::{
         signup, verify_challenge, verify_email,
     },
     automations::handlers::{
-        delete_automation, list_alerts, list_automations, mark_alert_read, mark_alerts_read,
-        publish_automation, test_run_automation, update_automation, update_automation_status,
+        clear_alerts, delete_automation, list_alerts, list_automations, mark_alert_read,
+        mark_alerts_read, publish_automation, test_run_automation, update_automation,
+        update_automation_status,
     },
-    mcp::handlers::handle_mcp,
+    mcp::handlers::{
+        approve_mcp_approval, get_mcp_approval, handle_mcp, list_mcp_approvals, reject_mcp_approval,
+    },
     notifications::handlers::stream_alerts,
     polymarket::handlers::{fetch_market, fetch_markets},
     response::{ApiResponse, ok},
@@ -67,7 +70,7 @@ fn api_v1_router() -> Router<AppState> {
             patch(update_automation_status),
         )
         .route("/automations/test-run", post(test_run_automation))
-        .route("/automation-alerts", get(list_alerts))
+        .route("/automation-alerts", get(list_alerts).delete(clear_alerts))
         .route("/automation-alerts/read", patch(mark_alerts_read))
         .route("/automation-alerts/{alert_id}/read", patch(mark_alert_read))
         .route("/automation-alerts/stream", get(stream_alerts))
@@ -75,6 +78,16 @@ fn api_v1_router() -> Router<AppState> {
         .route("/polymarket/markets/{market_id}", get(fetch_market))
         .route("/users/waitlist", post(join_waitlist))
         .route("/mcp", post(handle_mcp))
+        .route("/mcp/approvals", get(list_mcp_approvals))
+        .route("/mcp/approvals/{approval_id}", get(get_mcp_approval))
+        .route(
+            "/mcp/approvals/{approval_id}/approve",
+            post(approve_mcp_approval),
+        )
+        .route(
+            "/mcp/approvals/{approval_id}/reject",
+            post(reject_mcp_approval),
+        )
 }
 
 fn is_allowed_origin(origin: &HeaderValue) -> bool {

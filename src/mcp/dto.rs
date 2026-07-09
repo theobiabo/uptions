@@ -125,6 +125,28 @@ pub struct PrepareTradeActionPayload {
     pub outcome: String,
 }
 
+#[derive(Debug, Serialize, ToSchema)]
+pub struct McpApprovalResponse {
+    pub id: String,
+    pub tool: String,
+    pub status: String,
+    #[schema(value_type = Object)]
+    pub payload: Value,
+    #[schema(value_type = Object)]
+    pub result: Option<Value>,
+    pub created_at: String,
+    pub updated_at: String,
+    pub decided_at: Option<String>,
+    pub expires_at: String,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct McpApprovalDecisionResponse {
+    pub approval: McpApprovalResponse,
+    #[schema(value_type = Object)]
+    pub result: Option<Value>,
+}
+
 fn empty_object() -> Value {
     Value::Object(Map::new())
 }
