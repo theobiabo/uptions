@@ -35,6 +35,24 @@ pub struct UserTradingProviderResponse {
 }
 
 #[derive(Deserialize, Serialize, ToSchema)]
+pub struct UpdateWalletRequest {
+    #[schema(example = "0x1234567890abcdef1234567890abcdef12345678")]
+    pub wallet_address: String,
+    pub provider: SupportedVenue,
+    pub chain: SupportedChain,
+    #[schema(example = 137)]
+    pub chain_id: u64,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct UserWalletResponse {
+    pub chain: SupportedChain,
+    pub chain_id: u64,
+    pub provider: SupportedVenue,
+    pub wallet_address: String,
+}
+
+#[derive(Deserialize, Serialize, ToSchema)]
 pub struct WaitlistUser {
     #[schema(example = "ada@example.com")]
     email: String,
@@ -90,6 +108,49 @@ pub async fn update_trading_provider(
         "Trading provider saved successfully",
         UserTradingProviderResponse {
             preferred_trading_provider: provider,
+        },
+    ))
+}
+
+#[utoipa::path(
+    patch,
+    path = "/api/v1/users/wallet",
+    tag = "Users",
+    security(("bearer_auth" = [])),
+    request_body = UpdateWalletRequest,
+    responses(
+        (status = 200, description = "Connected wallet saved", body = ApiResponse<UserWalletResponse>),
+        (status = 400, description = "Invalid wallet payload", body = ErrorResponse),
+        (status = 401, description = "Missing or invalid bearer token", body = ErrorResponse)
+    )
+)]
+pub async fn update_wallet(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<UpdateWalletRequest>,
+) -> Result<Json<ApiResponse<UserWalletResponse>>, AppError> {
+    let expected_chain = payload.provider.chain();
+
+    if payload.chain != expected_chain || payload.chain_id != expected_chain.chain_id() {
+        return Err(AppError::BadRequest(
+            "wallet chain is not supported by selected provider".to_owned(),
+        ));
+    }
+
+    let access_token = bearer_token(&headers)?;
+    let user_id = state.auth_service.current_user_id(&access_token).await?;
+    let wallet_address = state
+        .user_service
+        .set_connected_wallet(&user_id, &payload.wallet_address)
+        .await?;
+
+    Ok(ok(
+        "Connected wallet saved successfully",
+        UserWalletResponse {
+            chain: payload.chain,
+            chain_id: payload.chain_id,
+            provider: payload.provider,
+            wallet_address,
         },
     ))
 }

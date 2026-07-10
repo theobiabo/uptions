@@ -19,6 +19,12 @@ impl SupportedChain {
             Self::Polygon => "Polygon",
         }
     }
+
+    pub fn as_storage_value(self) -> &'static str {
+        match self {
+            Self::Polygon => "POLYGON",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize, ToSchema)]

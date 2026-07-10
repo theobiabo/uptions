@@ -4,18 +4,13 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use aes_gcm::{
-    Aes256Gcm, Nonce,
-    aead::{Aead, KeyInit},
-};
 use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier, password_hash::SaltString};
-use base64::{Engine, engine::general_purpose::STANDARD};
 use chrono::{DateTime, Utc};
 use k256::{
     EncodedPoint,
     ecdsa::{RecoveryId, Signature, VerifyingKey},
 };
-use rand_core::{OsRng, RngCore};
+use rand_core::OsRng;
 use sha3::{Digest, Keccak256};
 use tokio::sync::RwLock;
 use uuid::Uuid;
@@ -30,7 +25,10 @@ use crate::{
     db::Db,
     entities::{auth_method, user, user_session, venue_connection},
     error::AppError,
-    libs::resend_client::send_email,
+    libs::{
+        credentials::{encrypt_json, parse_encryption_key},
+        resend_client::send_email,
+    },
     venue::SupportedVenue,
 };
 use sea_orm::{
@@ -641,52 +639,6 @@ fn normalize_token(token: &str) -> Result<&str, AppError> {
 
 fn timestamp_after(duration: Duration) -> DateTime<Utc> {
     (SystemTime::now() + duration).into()
-}
-
-fn encrypt_json(key: &[u8; 32], value: &Value) -> Result<Value, AppError> {
-    let cipher = Aes256Gcm::new_from_slice(key)
-        .map_err(|_| AppError::DatabaseError("invalid encryption key".to_owned()))?;
-    let mut nonce_bytes = [0_u8; 12];
-    OsRng.fill_bytes(&mut nonce_bytes);
-    let nonce = Nonce::from_slice(&nonce_bytes);
-    let plaintext =
-        serde_json::to_vec(value).map_err(|error| AppError::BadRequest(error.to_string()))?;
-    let ciphertext = cipher
-        .encrypt(nonce, plaintext.as_ref())
-        .map_err(|_| AppError::DatabaseError("failed to encrypt credentials".to_owned()))?;
-
-    Ok(json!({
-        "encrypted": true,
-        "cipher": "AES-256-GCM",
-        "nonce": STANDARD.encode(nonce_bytes),
-        "payload": STANDARD.encode(ciphertext)
-    }))
-}
-
-fn parse_encryption_key(value: &str) -> Result<[u8; 32], AppError> {
-    let trimmed = value.trim();
-    let decoded = if trimmed.len() == 64
-        && trimmed
-            .chars()
-            .all(|character| character.is_ascii_hexdigit())
-    {
-        decode_hex(trimmed)
-            .map_err(|_| AppError::BadRequest("invalid encryption key".to_owned()))?
-    } else {
-        STANDARD
-            .decode(trimmed)
-            .unwrap_or_else(|_| trimmed.as_bytes().to_vec())
-    };
-
-    if decoded.len() != 32 {
-        return Err(AppError::BadRequest(
-            "credential encryption key must be 32 bytes".to_owned(),
-        ));
-    }
-
-    let mut key = [0_u8; 32];
-    key.copy_from_slice(&decoded);
-    Ok(key)
 }
 
 fn default_permissions() -> Value {

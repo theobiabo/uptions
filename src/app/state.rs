@@ -5,6 +5,7 @@ use crate::{
     db::{Db, connect},
     notifications::service::NotificationService,
     polymarket::client::PolymarketClient,
+    trades::service::TradeService,
     users::service::UserService,
 };
 use migration::Migrator;
@@ -18,6 +19,7 @@ pub struct AppState {
     pub db: Db,
     pub notification_service: NotificationService,
     pub polymarket_client: PolymarketClient,
+    pub trade_service: TradeService,
     pub user_service: UserService,
 }
 
@@ -36,6 +38,11 @@ impl AppState {
         )
         .start();
         let polymarket_client = PolymarketClient::new(&config);
+        let trade_service = TradeService::new(
+            db.clone(),
+            polymarket_client.clone(),
+            config.credential_encryption_key.clone(),
+        );
 
         Ok(Self {
             auth_service: AuthService::new(
@@ -47,6 +54,7 @@ impl AppState {
             db: db.clone(),
             notification_service,
             polymarket_client,
+            trade_service,
             user_service: UserService::new(db),
         })
     }

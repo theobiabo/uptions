@@ -15,9 +15,10 @@ use crate::{
         TestRunAutomationResponse, WorkflowActionType, WorkflowPayload,
     },
     db::Db,
-    entities::{automation, automation_alert},
+    entities::{automation, automation_alert, user},
     error::AppError,
     notifications::{dto::AutomationAlertStreamEvent, service::NotificationService},
+    venue::SupportedVenue,
 };
 
 #[derive(Clone)]
@@ -125,6 +126,8 @@ impl AutomationService {
     ) -> Result<AutomationResponse, AppError> {
         validate_workflow(&payload.workflow)?;
         validate_provider(payload.provider)?;
+        self.validate_user_readiness(user_id, payload.provider)
+            .await?;
         let existing = self.find_owned_automation(user_id, automation_id).await?;
         let title = clean_title(&payload.title)?;
         let market_id = clean_required(&payload.market.id, "market id is required")?;
@@ -223,6 +226,8 @@ impl AutomationService {
     ) -> Result<AutomationResponse, AppError> {
         validate_workflow(&payload.workflow)?;
         validate_provider(payload.provider)?;
+        self.validate_user_readiness(user_id, payload.provider)
+            .await?;
         let title = clean_title(&payload.title)?;
         let market_id = clean_required(&payload.market.id, "market id is required")?;
         let market_title = clean_required(&payload.market.title, "market title is required")?;
@@ -332,6 +337,40 @@ impl AutomationService {
             .one(&self.db)
             .await?
             .ok_or_else(|| AppError::NotFound("automation not found".to_owned()))
+    }
+
+    async fn validate_user_readiness(
+        &self,
+        user_id: &str,
+        provider: AutomationProvider,
+    ) -> Result<(), AppError> {
+        let model = user::Entity::find_by_id(user_id.to_owned())
+            .one(&self.db)
+            .await?
+            .ok_or(AppError::Unauthorized)?;
+        let selected_provider = model
+            .preferred_trading_provider
+            .as_deref()
+            .and_then(SupportedVenue::from_storage_value)
+            .ok_or_else(|| {
+                AppError::BadRequest(
+                    "select a trading provider before publishing automation".to_owned(),
+                )
+            })?;
+
+        if selected_provider.id() != provider.venue_id() {
+            return Err(AppError::BadRequest(
+                "selected trading provider does not match this automation".to_owned(),
+            ));
+        }
+
+        if model.primary_wallet_address.is_none() {
+            return Err(AppError::BadRequest(
+                "connect a wallet before publishing automation".to_owned(),
+            ));
+        }
+
+        Ok(())
     }
 
     pub async fn create_alert(

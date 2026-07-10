@@ -10,6 +10,7 @@ pub mod mcp;
 pub mod notifications;
 pub mod polymarket;
 pub mod response;
+pub mod trades;
 pub mod users;
 pub mod venue;
 

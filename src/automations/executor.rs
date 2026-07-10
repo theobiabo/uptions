@@ -221,6 +221,7 @@ impl AutomationExecutor {
         let max_price = number_param(&action.params, "max_price")
             .or_else(|| number_param(&action.params, "price"))
             .or_else(|| market_price(market, outcome));
+        let token_id = market_token_id(market, outcome);
         let message = format!(
             "{} wants approval to {} {} on {}.",
             automation.title,
@@ -242,6 +243,7 @@ impl AutomationExecutor {
                     "run_id": run_id,
                     "market_id": automation.market_id,
                     "market_title": automation.market_title,
+                    "token_id": token_id,
                     "side": side,
                     "outcome": outcome,
                     "amount": amount,
@@ -260,7 +262,8 @@ impl AutomationExecutor {
             "outcome": outcome,
             "amount": amount,
             "order_type": order_type,
-            "max_price": max_price
+            "max_price": max_price,
+            "token_id": token_id
         }))
     }
 
@@ -381,6 +384,21 @@ fn compare_price(
     market_price(market, outcome)
         .zip(number_param(&step.params, "price"))
         .is_some_and(|(current, target)| predicate(current, target))
+}
+
+fn market_token_id(market: Option<&Value>, outcome: &str) -> Option<String> {
+    let market = market?;
+    let outcomes = string_array(market.get("outcomes"));
+    let token_ids = string_array(market.get("clobTokenIds"));
+    let index = outcomes
+        .iter()
+        .position(|value| value.eq_ignore_ascii_case(outcome))
+        .unwrap_or(0);
+
+    token_ids
+        .get(index)
+        .cloned()
+        .or_else(|| token_ids.first().cloned())
 }
 
 fn market_price(market: Option<&Value>, outcome: &str) -> Option<f64> {

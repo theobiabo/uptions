@@ -30,7 +30,10 @@ use crate::{
     notifications::handlers::stream_alerts,
     polymarket::handlers::{fetch_market, fetch_markets, fetch_order_book, fetch_venue_chain},
     response::{ApiResponse, ok},
-    users::handler::{join_waitlist, list_trading_providers, update_trading_provider},
+    trades::handlers::{create_trade_intent, get_trade, list_trades, submit_signed_trade},
+    users::handler::{
+        join_waitlist, list_trading_providers, update_trading_provider, update_wallet,
+    },
 };
 
 #[utoipa::path(
@@ -78,8 +81,13 @@ fn api_v1_router() -> Router<AppState> {
         .route("/polymarket/markets/{market_id}", get(fetch_market))
         .route("/polymarket/order-books/{token_id}", get(fetch_order_book))
         .route("/polymarket/venue-chain", get(fetch_venue_chain))
+        .route("/trades", get(list_trades))
+        .route("/trades/preflight", post(create_trade_intent))
+        .route("/trades/{trade_id}", get(get_trade))
+        .route("/trades/{trade_id}/submit", post(submit_signed_trade))
         .route("/trading-providers", get(list_trading_providers))
         .route("/users/trading-provider", patch(update_trading_provider))
+        .route("/users/wallet", patch(update_wallet))
         .route("/users/waitlist", post(join_waitlist))
         .route("/mcp", post(handle_mcp))
         .route("/mcp/approvals", get(list_mcp_approvals))

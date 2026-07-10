@@ -43,3 +43,29 @@ pub struct OrderBookResponse {
     pub token_id: String,
     pub updated_at: String,
 }
+
+#[derive(Clone, Debug)]
+pub struct PolymarketApiCredentials {
+    pub address: String,
+    pub api_key: String,
+    pub secret: String,
+    pub passphrase: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema)]
+pub struct PolymarketSignedOrderPayload {
+    #[schema(value_type = Object)]
+    pub signed_order: serde_json::Value,
+    pub execution_type: String,
+    #[serde(default)]
+    pub defer_exec: bool,
+    pub post_only: Option<bool>,
+}
+
+#[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct PolymarketTokenMetadataResponse {
+    pub fee_rate_bps: u64,
+    pub negative_risk: bool,
+    pub tick_size: String,
+    pub token_id: String,
+}
