@@ -28,9 +28,9 @@ use crate::{
         approve_mcp_approval, get_mcp_approval, handle_mcp, list_mcp_approvals, reject_mcp_approval,
     },
     notifications::handlers::stream_alerts,
-    polymarket::handlers::{fetch_market, fetch_markets},
+    polymarket::handlers::{fetch_market, fetch_markets, fetch_order_book, fetch_venue_chain},
     response::{ApiResponse, ok},
-    users::handler::join_waitlist,
+    users::handler::{join_waitlist, list_trading_providers, update_trading_provider},
 };
 
 #[utoipa::path(
@@ -76,6 +76,10 @@ fn api_v1_router() -> Router<AppState> {
         .route("/automation-alerts/stream", get(stream_alerts))
         .route("/polymarket/markets", get(fetch_markets))
         .route("/polymarket/markets/{market_id}", get(fetch_market))
+        .route("/polymarket/order-books/{token_id}", get(fetch_order_book))
+        .route("/polymarket/venue-chain", get(fetch_venue_chain))
+        .route("/trading-providers", get(list_trading_providers))
+        .route("/users/trading-provider", patch(update_trading_provider))
         .route("/users/waitlist", post(join_waitlist))
         .route("/mcp", post(handle_mcp))
         .route("/mcp/approvals", get(list_mcp_approvals))

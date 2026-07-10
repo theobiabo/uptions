@@ -1,5 +1,11 @@
-use crate::{db::Db, entities::waitlist, error::AppError, libs::resend_client::send_email};
-use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
+use crate::{
+    db::Db,
+    entities::{user, waitlist},
+    error::AppError,
+    libs::resend_client::send_email,
+    venue::SupportedVenue,
+};
+use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, IntoActiveModel, QueryFilter, Set};
 
 pub struct JoinWaitlistStruct {
     pub email: String,
@@ -13,6 +19,22 @@ pub struct UserService {
 impl UserService {
     pub fn new(db: Db) -> Self {
         Self { db }
+    }
+
+    pub async fn set_preferred_trading_provider(
+        &self,
+        user_id: &str,
+        provider: SupportedVenue,
+    ) -> Result<SupportedVenue, AppError> {
+        let model = user::Entity::find_by_id(user_id.to_owned())
+            .one(&self.db)
+            .await?
+            .ok_or(AppError::Unauthorized)?;
+        let mut active = model.into_active_model();
+        active.preferred_trading_provider = Set(Some(provider.as_storage_value().to_owned()));
+        active.update(&self.db).await?;
+
+        Ok(provider)
     }
 
     pub async fn join_waitlist(&self, payload: JoinWaitlistStruct) -> Result<(), AppError> {

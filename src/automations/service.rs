@@ -15,7 +15,7 @@ use crate::{
         TestRunAutomationResponse, WorkflowActionType, WorkflowPayload,
     },
     db::Db,
-    entities::{automation, automation_alert, venue_connection},
+    entities::{automation, automation_alert},
     error::AppError,
     notifications::{dto::AutomationAlertStreamEvent, service::NotificationService},
 };
@@ -124,8 +124,7 @@ impl AutomationService {
         payload: PublishAutomationRequest,
     ) -> Result<AutomationResponse, AppError> {
         validate_workflow(&payload.workflow)?;
-        self.validate_provider_readiness(user_id, payload.provider, &payload.workflow)
-            .await?;
+        validate_provider(payload.provider)?;
         let existing = self.find_owned_automation(user_id, automation_id).await?;
         let title = clean_title(&payload.title)?;
         let market_id = clean_required(&payload.market.id, "market id is required")?;
@@ -223,8 +222,7 @@ impl AutomationService {
         payload: PublishAutomationRequest,
     ) -> Result<AutomationResponse, AppError> {
         validate_workflow(&payload.workflow)?;
-        self.validate_provider_readiness(user_id, payload.provider, &payload.workflow)
-            .await?;
+        validate_provider(payload.provider)?;
         let title = clean_title(&payload.title)?;
         let market_id = clean_required(&payload.market.id, "market id is required")?;
         let market_title = clean_required(&payload.market.title, "market title is required")?;
@@ -334,43 +332,6 @@ impl AutomationService {
             .one(&self.db)
             .await?
             .ok_or_else(|| AppError::NotFound("automation not found".to_owned()))
-    }
-
-    async fn validate_provider_readiness(
-        &self,
-        user_id: &str,
-        provider: AutomationProvider,
-        workflow: &WorkflowPayload,
-    ) -> Result<(), AppError> {
-        if provider != AutomationProvider::Polymarket {
-            return Err(AppError::BadRequest(
-                "unsupported automation provider".to_owned(),
-            ));
-        }
-
-        if !workflow
-            .steps
-            .iter()
-            .any(|step| is_trade_action(step.action))
-        {
-            return Ok(());
-        }
-
-        let connection = venue_connection::Entity::find()
-            .filter(venue_connection::Column::UserId.eq(user_id))
-            .filter(venue_connection::Column::Venue.eq(provider.venue_id()))
-            .filter(venue_connection::Column::Enabled.eq(true))
-            .filter(venue_connection::Column::Status.eq("active"))
-            .one(&self.db)
-            .await?;
-
-        if connection.is_none() {
-            return Err(AppError::BadRequest(
-                "connect Polymarket before publishing trade actions".to_owned(),
-            ));
-        }
-
-        Ok(())
     }
 
     pub async fn create_alert(
@@ -654,8 +615,14 @@ fn has_disconnected_steps(workflow: &WorkflowPayload) -> bool {
         .any(|step| !connected.contains(step.id.as_str()))
 }
 
-fn is_trade_action(action: WorkflowActionType) -> bool {
-    matches!(action, WorkflowActionType::Buy | WorkflowActionType::Sell)
+fn validate_provider(provider: AutomationProvider) -> Result<(), AppError> {
+    if provider != AutomationProvider::Polymarket {
+        return Err(AppError::BadRequest(
+            "unsupported automation provider".to_owned(),
+        ));
+    }
+
+    Ok(())
 }
 
 fn kind_order(kind: AutomationStepKind) -> u8 {

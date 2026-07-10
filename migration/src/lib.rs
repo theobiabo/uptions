@@ -13,6 +13,8 @@ impl MigratorTrait for Migrator {
             Box::new(m20260707_000001_automations::Migration),
             Box::new(m20260709_000001_automation_alert_reads::Migration),
             Box::new(m20260709_000002_mcp_approval_requests::Migration),
+            Box::new(m20260710_000001_automation_runs::Migration),
+            Box::new(m20260710_000002_user_trading_provider::Migration),
         ]
     }
 }
@@ -23,3 +25,5 @@ mod m20260610_000001_email_verification_and_password_reset;
 mod m20260707_000001_automations;
 mod m20260709_000001_automation_alert_reads;
 mod m20260709_000002_mcp_approval_requests;
+mod m20260710_000001_automation_runs;
+mod m20260710_000002_user_trading_provider;

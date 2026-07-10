@@ -2,6 +2,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use utoipa::ToSchema;
 
+use crate::venue::SupportedVenue;
+
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct SignupRequest {
     #[schema(example = "user@uptions.com")]
@@ -80,6 +82,7 @@ pub struct AuthUserResponse {
     pub email: Option<String>,
     #[schema(example = true)]
     pub email_verified: bool,
+    pub preferred_trading_provider: Option<SupportedVenue>,
     pub venue_connections: Vec<VenueConnectionResponse>,
 }
 

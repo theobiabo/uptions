@@ -1,6 +1,6 @@
 use crate::{
     auth::service::AuthService,
-    automations::service::AutomationService,
+    automations::{executor::AutomationExecutor, service::AutomationService},
     config::AppConfig,
     db::{Db, connect},
     notifications::service::NotificationService,
@@ -28,16 +28,25 @@ impl AppState {
 
         let notification_service = NotificationService::new();
 
+        let automation_service = AutomationService::new(db.clone(), notification_service.clone());
+        AutomationExecutor::new(
+            db.clone(),
+            automation_service.clone(),
+            PolymarketClient::new(&config),
+        )
+        .start();
+        let polymarket_client = PolymarketClient::new(&config);
+
         Ok(Self {
             auth_service: AuthService::new(
                 db.clone(),
                 config.credential_encryption_key.clone(),
                 config.app_base_url.clone(),
             ),
-            automation_service: AutomationService::new(db.clone(), notification_service.clone()),
+            automation_service,
             db: db.clone(),
             notification_service,
-            polymarket_client: PolymarketClient::new(&config),
+            polymarket_client,
             user_service: UserService::new(db),
         })
     }

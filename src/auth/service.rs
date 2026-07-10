@@ -31,6 +31,7 @@ use crate::{
     entities::{auth_method, user, user_session, venue_connection},
     error::AppError,
     libs::resend_client::send_email,
+    venue::SupportedVenue,
 };
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, EntityTrait, IntoActiveModel, QueryFilter, Set,
@@ -541,6 +542,10 @@ impl AuthService {
             wallet_address: user.primary_wallet_address.clone(),
             email: user.email.clone(),
             email_verified: user.email.is_none() || user.email_verified_at.is_some(),
+            preferred_trading_provider: user
+                .preferred_trading_provider
+                .as_deref()
+                .and_then(SupportedVenue::from_storage_value),
             venue_connections,
         })
     }
