@@ -18,8 +18,9 @@ use uuid::Uuid;
 use crate::{
     auth::dto::{
         AuthSessionResponse, AuthUserResponse, ConnectPolymarketRequest, CreateChallengeResponse,
-        ForgotPasswordRequest, LoginRequest, ResetPasswordRequest, SignupRequest,
-        VenueConnectionResponse, VerifyChallengeResponse,
+        ForgotPasswordRequest, LoginRequest, ResetPasswordRequest, SettingsUpdateResponse,
+        SignupRequest, UpdateEmailRequest, UpdatePasswordRequest, VenueConnectionResponse,
+        VerifyChallengeResponse,
     },
     automations::dto::AutomationProvider,
     db::Db,
@@ -294,6 +295,89 @@ impl AuthService {
         Ok(self.auth_user_response(&user).await?)
     }
 
+    pub async fn update_email(
+        &self,
+        access_token: &str,
+        payload: UpdateEmailRequest,
+    ) -> Result<AuthUserResponse, AppError> {
+        let session = self.session(access_token).await?;
+        let email = normalize_email(&payload.email)?;
+        let model = user::Entity::find_by_id(&session.user_id)
+            .one(&self.db)
+            .await?
+            .ok_or(AppError::Unauthorized)?;
+
+        if let Some(password_hash) = model.password_hash.as_deref() {
+            let current_password = payload
+                .current_password
+                .as_deref()
+                .ok_or_else(|| AppError::BadRequest("current password is required".to_owned()))?;
+
+            if !verify_password(current_password, password_hash)? {
+                return Err(AppError::Unauthorized);
+            }
+        }
+
+        if model.email.as_deref() == Some(email.as_str()) {
+            return self.auth_user_response(&model).await;
+        }
+
+        let existing = user::Entity::find()
+            .filter(user::Column::Email.eq(Some(email.clone())))
+            .one(&self.db)
+            .await?;
+
+        if existing.is_some_and(|existing| existing.id != model.id) {
+            return Err(AppError::Conflict("email is already registered".to_owned()));
+        }
+
+        let verification_token = generate_auth_token();
+        let verification_expires_at =
+            timestamp_after(Duration::from_secs(EMAIL_VERIFICATION_TTL_SECONDS));
+        let user_id = model.id.clone();
+        let mut active = model.into_active_model();
+        active.email = Set(Some(email.clone()));
+        active.email_verified_at = Set(None);
+        active.email_verification_token_hash = Set(Some(hash_access_token(&verification_token)));
+        active.email_verification_expires_at = Set(Some(verification_expires_at.into()));
+        active.updated_at = Set(Utc::now().into());
+        let model = active.update(&self.db).await?;
+        self.sync_email_auth_method(&user_id, &email).await?;
+        self.send_verification_email(&email, &verification_token)
+            .await;
+
+        self.auth_user_response(&model).await
+    }
+
+    pub async fn update_password(
+        &self,
+        access_token: &str,
+        payload: UpdatePasswordRequest,
+    ) -> Result<SettingsUpdateResponse, AppError> {
+        let session = self.session(access_token).await?;
+        let model = user::Entity::find_by_id(&session.user_id)
+            .one(&self.db)
+            .await?
+            .ok_or(AppError::Unauthorized)?;
+        let password_hash = model.password_hash.as_deref().ok_or_else(|| {
+            AppError::BadRequest("password is not configured for this account".to_owned())
+        })?;
+
+        if !verify_password(&payload.current_password, password_hash)? {
+            return Err(AppError::Unauthorized);
+        }
+
+        validate_password(&payload.new_password)?;
+        let mut active = model.into_active_model();
+        active.password_hash = Set(Some(hash_password(&payload.new_password)?));
+        active.updated_at = Set(Utc::now().into());
+        active.update(&self.db).await?;
+
+        Ok(SettingsUpdateResponse {
+            message: "Password updated successfully".to_owned(),
+        })
+    }
+
     pub async fn connect_polymarket(
         &self,
         access_token: &str,
@@ -449,6 +533,23 @@ impl AuthService {
         Ok(())
     }
 
+    async fn sync_email_auth_method(&self, user_id: &str, email: &str) -> Result<(), AppError> {
+        if let Some(model) = auth_method::Entity::find()
+            .filter(auth_method::Column::UserId.eq(user_id))
+            .filter(auth_method::Column::MethodType.eq("email"))
+            .one(&self.db)
+            .await?
+        {
+            let mut active = model.into_active_model();
+            active.external_id = Set(email.to_owned());
+            active.updated_at = Set(Utc::now().into());
+            active.update(&self.db).await?;
+            return Ok(());
+        }
+
+        self.ensure_email_auth_method(user_id, email).await
+    }
+
     async fn ensure_email_auth_method(&self, user_id: &str, email: &str) -> Result<(), AppError> {
         auth_method::Entity::insert(auth_method::ActiveModel {
             id: Set(Uuid::new_v4().to_string()),
@@ -540,6 +641,7 @@ impl AuthService {
             wallet_address: user.primary_wallet_address.clone(),
             email: user.email.clone(),
             email_verified: user.email.is_none() || user.email_verified_at.is_some(),
+            password_configured: user.password_hash.is_some(),
             preferred_trading_provider: user
                 .preferred_trading_provider
                 .as_deref()

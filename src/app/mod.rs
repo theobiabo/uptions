@@ -17,7 +17,7 @@ use crate::{
     app::state::AppState,
     auth::handlers::{
         connect_polymarket, create_challenge, current_user, forgot_password, login, reset_password,
-        signup, verify_challenge, verify_email,
+        signup, update_email, update_password, verify_challenge, verify_email,
     },
     automations::handlers::{
         clear_alerts, delete_automation, list_alerts, list_automations, mark_alert_read,
@@ -86,6 +86,8 @@ fn api_v1_router() -> Router<AppState> {
         .route("/trades/{trade_id}", get(get_trade))
         .route("/trades/{trade_id}/submit", post(submit_signed_trade))
         .route("/trading-providers", get(list_trading_providers))
+        .route("/users/settings/email", patch(update_email))
+        .route("/users/settings/password", patch(update_password))
         .route("/users/trading-provider", patch(update_trading_provider))
         .route("/users/wallet", patch(update_wallet))
         .route("/users/waitlist", post(join_waitlist))
