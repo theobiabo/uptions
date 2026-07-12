@@ -1,0 +1,153 @@
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use utoipa::ToSchema;
+
+use crate::{polymarket::dto::PolymarketTokenMetadataResponse, venue::SupportedVenue};
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum TradeSide {
+    Buy,
+    Sell,
+}
+
+impl TradeSide {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Buy => "BUY",
+            Self::Sell => "SELL",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum TradeOrderType {
+    Market,
+    Limit,
+}
+
+impl TradeOrderType {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Market => "MARKET",
+            Self::Limit => "LIMIT",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum PolymarketExecutionType {
+    Fok,
+    Fak,
+    Gtc,
+    Gtd,
+}
+
+impl PolymarketExecutionType {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Fok => "FOK",
+            Self::Fak => "FAK",
+            Self::Gtc => "GTC",
+            Self::Gtd => "GTD",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TradeIntentStatus {
+    PendingSignature,
+    Submitted,
+    Filled,
+    PartiallyFilled,
+    Rejected,
+    Failed,
+    Cancelled,
+}
+
+impl TradeIntentStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::PendingSignature => "pending_signature",
+            Self::Submitted => "submitted",
+            Self::Filled => "filled",
+            Self::PartiallyFilled => "partially_filled",
+            Self::Rejected => "rejected",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct CreateTradeIntentRequest {
+    pub amount: f64,
+    pub automation_id: Option<String>,
+    #[schema(example = "540818")]
+    pub market_id: String,
+    #[schema(example = "World Cup: Golden Boot Winner")]
+    pub market_title: String,
+    #[schema(example = "YES")]
+    pub outcome: String,
+    pub price: Option<f64>,
+    pub provider: SupportedVenue,
+    pub side: TradeSide,
+    pub order_type: TradeOrderType,
+    pub execution_type: PolymarketExecutionType,
+    #[schema(example = "123456789")]
+    pub token_id: String,
+    #[schema(example = "0x1234567890abcdef1234567890abcdef12345678")]
+    pub wallet_address: String,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct SubmitSignedTradeRequest {
+    #[serde(default)]
+    pub defer_exec: bool,
+    pub execution_type: PolymarketExecutionType,
+    pub post_only: Option<bool>,
+    #[schema(value_type = Object)]
+    pub signed_order: Value,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct TradeIntentResponse {
+    pub amount: f64,
+    pub automation_id: Option<String>,
+    pub chain: String,
+    pub chain_id: i64,
+    pub created_at: String,
+    pub error: Option<String>,
+    pub execution_type: String,
+    pub id: String,
+    pub market_id: String,
+    pub market_title: String,
+    pub order_type: String,
+    pub outcome: String,
+    pub price: Option<f64>,
+    pub provider: String,
+    pub provider_order_id: Option<String>,
+    #[schema(value_type = Object)]
+    pub provider_response: Option<Value>,
+    pub side: String,
+    pub status: String,
+    pub submitted_at: Option<String>,
+    pub token_id: String,
+    pub updated_at: String,
+    pub wallet_address: String,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct CreateTradeIntentResponse {
+    pub trade: TradeIntentResponse,
+    pub token_metadata: PolymarketTokenMetadataResponse,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct SubmitSignedTradeResponse {
+    #[schema(value_type = Object)]
+    pub provider_response: Value,
+    pub trade: TradeIntentResponse,
+}

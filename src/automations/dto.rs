@@ -253,6 +253,12 @@ pub struct MarkAlertsReadResponse {
 }
 
 #[derive(Debug, Serialize, ToSchema)]
+pub struct ClearAlertsResponse {
+    #[schema(example = 3)]
+    pub deleted: u64,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
 pub struct TestRunAutomationResponse {
     #[schema(example = "success")]
     pub status: String,

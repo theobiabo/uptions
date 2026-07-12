@@ -14,6 +14,7 @@ pub struct Model {
     pub email_verification_expires_at: Option<DateTimeWithTimeZone>,
     pub password_reset_token_hash: Option<String>,
     pub password_reset_expires_at: Option<DateTimeWithTimeZone>,
+    pub preferred_trading_provider: Option<String>,
     pub created_at: DateTimeWithTimeZone,
     pub updated_at: DateTimeWithTimeZone,
 }

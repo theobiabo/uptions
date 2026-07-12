@@ -10,7 +10,9 @@ pub mod mcp;
 pub mod notifications;
 pub mod polymarket;
 pub mod response;
+pub mod trades;
 pub mod users;
+pub mod venue;
 
 pub fn load_env() {
     let manifest_env = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(".env");

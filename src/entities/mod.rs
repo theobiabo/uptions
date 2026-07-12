@@ -1,6 +1,9 @@
 pub mod auth_method;
 pub mod automation;
 pub mod automation_alert;
+pub mod automation_run;
+pub mod mcp_approval_request;
+pub mod trade_intent;
 pub mod user;
 pub mod user_session;
 pub mod venue_connection;

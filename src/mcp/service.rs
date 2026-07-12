@@ -1,7 +1,11 @@
 use axum::http::HeaderMap;
-use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+use chrono::{Duration, Utc};
+use sea_orm::{
+    ActiveModelTrait, ColumnTrait, EntityTrait, IntoActiveModel, QueryFilter, QueryOrder, Set,
+};
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
+use uuid::Uuid;
 
 use crate::{
     app::state::AppState,
@@ -10,12 +14,13 @@ use crate::{
         AutomationProvider, AutomationStatus, PublishAutomationRequest, TestRunAutomationRequest,
         WorkflowActionType,
     },
-    entities::venue_connection,
+    entities::{automation_alert, mcp_approval_request, venue_connection},
     error::AppError,
     mcp::dto::{
-        AutomationIdPayload, AutomationToolPayload, MarketIdPayload, McpRequest,
-        PrepareTradeActionPayload, PromptGetParams, ResourceReadParams, SearchMarketsPayload,
-        TestRunAutomationToolPayload, ToolCallParams, UpdateAutomationToolPayload,
+        AutomationIdPayload, AutomationToolPayload, MarketIdPayload, McpApprovalDecisionResponse,
+        McpApprovalResponse, McpRequest, PrepareTradeActionPayload, PromptGetParams,
+        ResourceReadParams, SearchMarketsPayload, TestRunAutomationToolPayload, ToolCallParams,
+        UpdateAutomationToolPayload,
     },
 };
 
@@ -148,24 +153,17 @@ async fn call_tool(
         }
         "create_automation" => {
             let user_id = authenticated_user_id(state, headers).await?;
-            let args: AutomationToolPayload =
-                parse_params(params.arguments, "Invalid automation payload")?;
-            let automation = state
-                .automation_service
-                .publish(&user_id, publish_request(args))
-                .await?;
-            Ok(tool_result(json!({ "automation": automation })))
+            let _: AutomationToolPayload =
+                parse_params(params.arguments.clone(), "Invalid automation payload")?;
+            create_approval_request(state, &user_id, "create_automation", params.arguments).await
         }
         "update_automation" => {
             let user_id = authenticated_user_id(state, headers).await?;
-            let args: UpdateAutomationToolPayload =
-                parse_params(params.arguments, "Invalid automation update payload")?;
-            let automation_id = args.automation_id.clone();
-            let automation = state
-                .automation_service
-                .update(&user_id, &automation_id, publish_request(args.into()))
-                .await?;
-            Ok(tool_result(json!({ "automation": automation })))
+            let _: UpdateAutomationToolPayload = parse_params(
+                params.arguments.clone(),
+                "Invalid automation update payload",
+            )?;
+            create_approval_request(state, &user_id, "update_automation", params.arguments).await
         }
         "test_run_automation" => {
             let user_id = authenticated_user_id(state, headers).await?;
@@ -179,33 +177,21 @@ async fn call_tool(
         }
         "pause_automation" => {
             let user_id = authenticated_user_id(state, headers).await?;
-            let args: AutomationIdPayload =
-                parse_params(params.arguments, "Invalid automation arguments")?;
-            let automation = state
-                .automation_service
-                .set_status(&user_id, &args.automation_id, AutomationStatus::Paused)
-                .await?;
-            Ok(tool_result(json!({ "automation": automation })))
+            let _: AutomationIdPayload =
+                parse_params(params.arguments.clone(), "Invalid automation arguments")?;
+            create_approval_request(state, &user_id, "pause_automation", params.arguments).await
         }
         "resume_automation" => {
             let user_id = authenticated_user_id(state, headers).await?;
-            let args: AutomationIdPayload =
-                parse_params(params.arguments, "Invalid automation arguments")?;
-            let automation = state
-                .automation_service
-                .set_status(&user_id, &args.automation_id, AutomationStatus::Active)
-                .await?;
-            Ok(tool_result(json!({ "automation": automation })))
+            let _: AutomationIdPayload =
+                parse_params(params.arguments.clone(), "Invalid automation arguments")?;
+            create_approval_request(state, &user_id, "resume_automation", params.arguments).await
         }
         "delete_automation" => {
             let user_id = authenticated_user_id(state, headers).await?;
-            let args: AutomationIdPayload =
-                parse_params(params.arguments, "Invalid automation arguments")?;
-            state
-                .automation_service
-                .delete(&user_id, &args.automation_id)
-                .await?;
-            Ok(tool_result(json!({ "deleted": true })))
+            let _: AutomationIdPayload =
+                parse_params(params.arguments.clone(), "Invalid automation arguments")?;
+            create_approval_request(state, &user_id, "delete_automation", params.arguments).await
         }
         "list_alerts" => {
             let user_id = authenticated_user_id(state, headers).await?;
@@ -395,6 +381,332 @@ async fn prepare_trade_action(
         "summary": format!("Prepare to {:?} {outcome} with a {order_type} order for ${}.", args.action, args.amount),
         "risk_note": "This MCP tool prepares a trade action preview only. Use create_automation or update_automation to save workflow behavior after user review."
     })))
+}
+
+pub async fn list_approvals(
+    state: &AppState,
+    user_id: &str,
+) -> Result<Vec<McpApprovalResponse>, AppError> {
+    let approvals = mcp_approval_request::Entity::find()
+        .filter(mcp_approval_request::Column::UserId.eq(user_id))
+        .order_by_desc(mcp_approval_request::Column::CreatedAt)
+        .all(&state.db)
+        .await?;
+
+    Ok(approvals.into_iter().map(approval_response).collect())
+}
+
+pub async fn get_approval(
+    state: &AppState,
+    user_id: &str,
+    approval_id: &str,
+) -> Result<McpApprovalResponse, AppError> {
+    let approval = find_owned_approval(state, user_id, approval_id).await?;
+
+    Ok(approval_response(approval))
+}
+
+pub async fn approve_request(
+    state: &AppState,
+    user_id: &str,
+    approval_id: &str,
+) -> Result<McpApprovalDecisionResponse, AppError> {
+    let approval = find_pending_approval(state, user_id, approval_id).await?;
+    let result =
+        execute_approved_tool(state, user_id, &approval.tool, approval.payload.clone()).await?;
+    let now = Utc::now();
+    let mut active = approval.into_active_model();
+    active.status = Set("approved".to_owned());
+    active.result = Set(Some(result.clone()));
+    active.updated_at = Set(now.into());
+    active.decided_at = Set(Some(now.into()));
+    let approval = active.update(&state.db).await?;
+    let response = approval_response(approval);
+    mark_approval_alert_decided(state, user_id, &response.id, "approved").await?;
+
+    state
+        .automation_service
+        .create_alert(
+            user_id,
+            None,
+            "MCP request approved",
+            &format!("{} was approved and executed.", tool_label(&response.tool)),
+            "success",
+            json!({
+                "type": "mcp_approval_approved",
+                "approval_id": response.id.clone(),
+                "tool": response.tool.clone(),
+                "result": result.clone()
+            }),
+        )
+        .await?;
+
+    Ok(McpApprovalDecisionResponse {
+        approval: response,
+        result: Some(result),
+    })
+}
+
+pub async fn reject_request(
+    state: &AppState,
+    user_id: &str,
+    approval_id: &str,
+) -> Result<McpApprovalDecisionResponse, AppError> {
+    let approval = find_pending_approval(state, user_id, approval_id).await?;
+    let now = Utc::now();
+    let result = json!({ "rejected": true });
+    let mut active = approval.into_active_model();
+    active.status = Set("rejected".to_owned());
+    active.result = Set(Some(result.clone()));
+    active.updated_at = Set(now.into());
+    active.decided_at = Set(Some(now.into()));
+    let approval = active.update(&state.db).await?;
+    let response = approval_response(approval);
+    mark_approval_alert_decided(state, user_id, &response.id, "rejected").await?;
+
+    state
+        .automation_service
+        .create_alert(
+            user_id,
+            None,
+            "MCP request rejected",
+            &format!("{} was rejected.", tool_label(&response.tool)),
+            "info",
+            json!({
+                "type": "mcp_approval_rejected",
+                "approval_id": response.id.clone(),
+                "tool": response.tool.clone()
+            }),
+        )
+        .await?;
+
+    Ok(McpApprovalDecisionResponse {
+        approval: response,
+        result: Some(result),
+    })
+}
+
+async fn create_approval_request(
+    state: &AppState,
+    user_id: &str,
+    tool: &str,
+    payload: Value,
+) -> Result<Value, AppError> {
+    let now = Utc::now();
+    let expires_at = now + Duration::hours(24);
+    let approval = mcp_approval_request::ActiveModel {
+        id: Set(Uuid::new_v4().to_string()),
+        user_id: Set(user_id.to_owned()),
+        tool: Set(tool.to_owned()),
+        status: Set("pending".to_owned()),
+        payload: Set(payload.clone()),
+        result: Set(None),
+        created_at: Set(now.into()),
+        updated_at: Set(now.into()),
+        decided_at: Set(None),
+        expires_at: Set(expires_at.into()),
+    }
+    .insert(&state.db)
+    .await?;
+    let response = approval_response(approval);
+
+    state
+        .automation_service
+        .create_alert(
+            user_id,
+            None,
+            "MCP approval required",
+            &format!(
+                "{} needs your approval before Uptions makes changes.",
+                tool_label(tool)
+            ),
+            "pending",
+            json!({
+                "type": "mcp_approval_requested",
+                "approval_id": response.id.clone(),
+                "tool": tool,
+                "action_label": tool_label(tool),
+                "payload": payload
+            }),
+        )
+        .await?;
+
+    Ok(tool_result(json!({
+        "approval_required": true,
+        "approval_id": response.id,
+        "status": response.status,
+        "expires_at": response.expires_at
+    })))
+}
+
+async fn execute_approved_tool(
+    state: &AppState,
+    user_id: &str,
+    tool: &str,
+    payload: Value,
+) -> Result<Value, AppError> {
+    match tool {
+        "create_automation" => {
+            let args: AutomationToolPayload = parse_params(payload, "Invalid automation payload")?;
+            let automation = state
+                .automation_service
+                .publish(user_id, publish_request(args))
+                .await?;
+            Ok(json!({ "automation": automation }))
+        }
+        "update_automation" => {
+            let args: UpdateAutomationToolPayload =
+                parse_params(payload, "Invalid automation update payload")?;
+            let automation_id = args.automation_id.clone();
+            let automation = state
+                .automation_service
+                .update(user_id, &automation_id, publish_request(args.into()))
+                .await?;
+            Ok(json!({ "automation": automation }))
+        }
+        "pause_automation" => {
+            let args: AutomationIdPayload = parse_params(payload, "Invalid automation arguments")?;
+            let automation = state
+                .automation_service
+                .set_status(user_id, &args.automation_id, AutomationStatus::Paused)
+                .await?;
+            Ok(json!({ "automation": automation }))
+        }
+        "resume_automation" => {
+            let args: AutomationIdPayload = parse_params(payload, "Invalid automation arguments")?;
+            let automation = state
+                .automation_service
+                .set_status(user_id, &args.automation_id, AutomationStatus::Active)
+                .await?;
+            Ok(json!({ "automation": automation }))
+        }
+        "delete_automation" => {
+            let args: AutomationIdPayload = parse_params(payload, "Invalid automation arguments")?;
+            state
+                .automation_service
+                .delete(user_id, &args.automation_id)
+                .await?;
+            Ok(json!({ "deleted": true, "automation_id": args.automation_id }))
+        }
+        _ => Err(AppError::BadRequest(
+            "unsupported MCP approval tool".to_owned(),
+        )),
+    }
+}
+
+async fn find_owned_approval(
+    state: &AppState,
+    user_id: &str,
+    approval_id: &str,
+) -> Result<mcp_approval_request::Model, AppError> {
+    let approval_id = approval_id.trim();
+
+    if approval_id.is_empty() {
+        return Err(AppError::BadRequest("approval id is required".to_owned()));
+    }
+
+    mcp_approval_request::Entity::find_by_id(approval_id.to_owned())
+        .filter(mcp_approval_request::Column::UserId.eq(user_id))
+        .one(&state.db)
+        .await?
+        .ok_or_else(|| AppError::NotFound("MCP approval request not found".to_owned()))
+}
+
+async fn find_pending_approval(
+    state: &AppState,
+    user_id: &str,
+    approval_id: &str,
+) -> Result<mcp_approval_request::Model, AppError> {
+    let approval = find_owned_approval(state, user_id, approval_id).await?;
+
+    if approval.status != "pending" {
+        return Err(AppError::Conflict(
+            "MCP approval request is already decided".to_owned(),
+        ));
+    }
+
+    if approval.expires_at < Utc::now().fixed_offset() {
+        let now = Utc::now();
+        let mut active = approval.into_active_model();
+        active.status = Set("expired".to_owned());
+        active.updated_at = Set(now.into());
+        active.decided_at = Set(Some(now.into()));
+        active.update(&state.db).await?;
+        return Err(AppError::Conflict(
+            "MCP approval request has expired".to_owned(),
+        ));
+    }
+
+    Ok(approval)
+}
+
+async fn mark_approval_alert_decided(
+    state: &AppState,
+    user_id: &str,
+    approval_id: &str,
+    status: &str,
+) -> Result<(), AppError> {
+    let alerts = automation_alert::Entity::find()
+        .filter(automation_alert::Column::UserId.eq(user_id))
+        .all(&state.db)
+        .await?;
+
+    for alert in alerts {
+        let matches_approval = alert
+            .meta
+            .get("approval_id")
+            .and_then(Value::as_str)
+            .is_some_and(|value| value == approval_id);
+        let matches_type = alert
+            .meta
+            .get("type")
+            .and_then(Value::as_str)
+            .is_some_and(|value| value == "mcp_approval_requested");
+
+        if matches_approval && matches_type {
+            let mut meta = alert.meta.clone();
+
+            if let Some(object) = meta.as_object_mut() {
+                object.insert(
+                    "approval_status".to_owned(),
+                    Value::String(status.to_owned()),
+                );
+            }
+
+            let mut active = alert.into_active_model();
+            active.status = Set(status.to_owned());
+            active.meta = Set(meta);
+            active.read_at = Set(Some(Utc::now().into()));
+            active.update(&state.db).await?;
+        }
+    }
+
+    Ok(())
+}
+
+fn approval_response(model: mcp_approval_request::Model) -> McpApprovalResponse {
+    McpApprovalResponse {
+        id: model.id,
+        tool: model.tool,
+        status: model.status,
+        payload: model.payload,
+        result: model.result,
+        created_at: model.created_at.to_rfc3339(),
+        updated_at: model.updated_at.to_rfc3339(),
+        decided_at: model.decided_at.map(|value| value.to_rfc3339()),
+        expires_at: model.expires_at.to_rfc3339(),
+    }
+}
+
+fn tool_label(tool: &str) -> &'static str {
+    match tool {
+        "create_automation" => "Create automation",
+        "update_automation" => "Update automation",
+        "pause_automation" => "Pause automation",
+        "resume_automation" => "Resume automation",
+        "delete_automation" => "Delete automation",
+        _ => "MCP action",
+    }
 }
 
 async fn has_ready_provider_connection(

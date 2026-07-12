@@ -20,14 +20,20 @@ use crate::{
         signup, verify_challenge, verify_email,
     },
     automations::handlers::{
-        delete_automation, list_alerts, list_automations, mark_alert_read, mark_alerts_read,
-        publish_automation, test_run_automation, update_automation, update_automation_status,
+        clear_alerts, delete_automation, list_alerts, list_automations, mark_alert_read,
+        mark_alerts_read, publish_automation, test_run_automation, update_automation,
+        update_automation_status,
     },
-    mcp::handlers::handle_mcp,
+    mcp::handlers::{
+        approve_mcp_approval, get_mcp_approval, handle_mcp, list_mcp_approvals, reject_mcp_approval,
+    },
     notifications::handlers::stream_alerts,
-    polymarket::handlers::{fetch_market, fetch_markets},
+    polymarket::handlers::{fetch_market, fetch_markets, fetch_order_book, fetch_venue_chain},
     response::{ApiResponse, ok},
-    users::handler::join_waitlist,
+    trades::handlers::{create_trade_intent, get_trade, list_trades, submit_signed_trade},
+    users::handler::{
+        join_waitlist, list_trading_providers, update_trading_provider, update_wallet,
+    },
 };
 
 #[utoipa::path(
@@ -67,14 +73,33 @@ fn api_v1_router() -> Router<AppState> {
             patch(update_automation_status),
         )
         .route("/automations/test-run", post(test_run_automation))
-        .route("/automation-alerts", get(list_alerts))
+        .route("/automation-alerts", get(list_alerts).delete(clear_alerts))
         .route("/automation-alerts/read", patch(mark_alerts_read))
         .route("/automation-alerts/{alert_id}/read", patch(mark_alert_read))
         .route("/automation-alerts/stream", get(stream_alerts))
         .route("/polymarket/markets", get(fetch_markets))
         .route("/polymarket/markets/{market_id}", get(fetch_market))
+        .route("/polymarket/order-books/{token_id}", get(fetch_order_book))
+        .route("/polymarket/venue-chain", get(fetch_venue_chain))
+        .route("/trades", get(list_trades))
+        .route("/trades/preflight", post(create_trade_intent))
+        .route("/trades/{trade_id}", get(get_trade))
+        .route("/trades/{trade_id}/submit", post(submit_signed_trade))
+        .route("/trading-providers", get(list_trading_providers))
+        .route("/users/trading-provider", patch(update_trading_provider))
+        .route("/users/wallet", patch(update_wallet))
         .route("/users/waitlist", post(join_waitlist))
         .route("/mcp", post(handle_mcp))
+        .route("/mcp/approvals", get(list_mcp_approvals))
+        .route("/mcp/approvals/{approval_id}", get(get_mcp_approval))
+        .route(
+            "/mcp/approvals/{approval_id}/approve",
+            post(approve_mcp_approval),
+        )
+        .route(
+            "/mcp/approvals/{approval_id}/reject",
+            post(reject_mcp_approval),
+        )
 }
 
 fn is_allowed_origin(origin: &HeaderValue) -> bool {

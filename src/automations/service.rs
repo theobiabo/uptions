@@ -15,9 +15,10 @@ use crate::{
         TestRunAutomationResponse, WorkflowActionType, WorkflowPayload,
     },
     db::Db,
-    entities::{automation, automation_alert, venue_connection},
+    entities::{automation, automation_alert, user},
     error::AppError,
     notifications::{dto::AutomationAlertStreamEvent, service::NotificationService},
+    venue::SupportedVenue,
 };
 
 #[derive(Clone)]
@@ -93,6 +94,20 @@ impl AutomationService {
         Ok(updated)
     }
 
+    pub async fn clear_alerts(&self, user_id: &str) -> Result<u64, AppError> {
+        let alerts = automation_alert::Entity::find()
+            .filter(automation_alert::Column::UserId.eq(user_id))
+            .all(&self.db)
+            .await?;
+        let deleted = alerts.len() as u64;
+
+        for model in alerts {
+            model.into_active_model().delete(&self.db).await?;
+        }
+
+        Ok(deleted)
+    }
+
     pub async fn get(
         &self,
         user_id: &str,
@@ -110,7 +125,8 @@ impl AutomationService {
         payload: PublishAutomationRequest,
     ) -> Result<AutomationResponse, AppError> {
         validate_workflow(&payload.workflow)?;
-        self.validate_provider_readiness(user_id, payload.provider, &payload.workflow)
+        validate_provider(payload.provider)?;
+        self.validate_user_readiness(user_id, payload.provider)
             .await?;
         let existing = self.find_owned_automation(user_id, automation_id).await?;
         let title = clean_title(&payload.title)?;
@@ -209,7 +225,8 @@ impl AutomationService {
         payload: PublishAutomationRequest,
     ) -> Result<AutomationResponse, AppError> {
         validate_workflow(&payload.workflow)?;
-        self.validate_provider_readiness(user_id, payload.provider, &payload.workflow)
+        validate_provider(payload.provider)?;
+        self.validate_user_readiness(user_id, payload.provider)
             .await?;
         let title = clean_title(&payload.title)?;
         let market_id = clean_required(&payload.market.id, "market id is required")?;
@@ -322,44 +339,41 @@ impl AutomationService {
             .ok_or_else(|| AppError::NotFound("automation not found".to_owned()))
     }
 
-    async fn validate_provider_readiness(
+    async fn validate_user_readiness(
         &self,
         user_id: &str,
         provider: AutomationProvider,
-        workflow: &WorkflowPayload,
     ) -> Result<(), AppError> {
-        if provider != AutomationProvider::Polymarket {
+        let model = user::Entity::find_by_id(user_id.to_owned())
+            .one(&self.db)
+            .await?
+            .ok_or(AppError::Unauthorized)?;
+        let selected_provider = model
+            .preferred_trading_provider
+            .as_deref()
+            .and_then(SupportedVenue::from_storage_value)
+            .ok_or_else(|| {
+                AppError::BadRequest(
+                    "select a trading provider before publishing automation".to_owned(),
+                )
+            })?;
+
+        if selected_provider.id() != provider.venue_id() {
             return Err(AppError::BadRequest(
-                "unsupported automation provider".to_owned(),
+                "selected trading provider does not match this automation".to_owned(),
             ));
         }
 
-        if !workflow
-            .steps
-            .iter()
-            .any(|step| is_trade_action(step.action))
-        {
-            return Ok(());
-        }
-
-        let connection = venue_connection::Entity::find()
-            .filter(venue_connection::Column::UserId.eq(user_id))
-            .filter(venue_connection::Column::Venue.eq(provider.venue_id()))
-            .filter(venue_connection::Column::Enabled.eq(true))
-            .filter(venue_connection::Column::Status.eq("active"))
-            .one(&self.db)
-            .await?;
-
-        if connection.is_none() {
+        if model.primary_wallet_address.is_none() {
             return Err(AppError::BadRequest(
-                "connect Polymarket before publishing trade actions".to_owned(),
+                "connect a wallet before publishing automation".to_owned(),
             ));
         }
 
         Ok(())
     }
 
-    async fn create_alert(
+    pub async fn create_alert(
         &self,
         user_id: &str,
         automation_id: Option<String>,
@@ -640,8 +654,14 @@ fn has_disconnected_steps(workflow: &WorkflowPayload) -> bool {
         .any(|step| !connected.contains(step.id.as_str()))
 }
 
-fn is_trade_action(action: WorkflowActionType) -> bool {
-    matches!(action, WorkflowActionType::Buy | WorkflowActionType::Sell)
+fn validate_provider(provider: AutomationProvider) -> Result<(), AppError> {
+    if provider != AutomationProvider::Polymarket {
+        return Err(AppError::BadRequest(
+            "unsupported automation provider".to_owned(),
+        ));
+    }
+
+    Ok(())
 }
 
 fn kind_order(kind: AutomationStepKind) -> u8 {

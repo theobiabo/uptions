@@ -10,7 +10,7 @@ use crate::{
     app::state::AppState,
     auth::handlers::bearer_token,
     automations::dto::{
-        AutomationAlertResponse, AutomationResponse, MarkAlertsReadResponse,
+        AutomationAlertResponse, AutomationResponse, ClearAlertsResponse, MarkAlertsReadResponse,
         PublishAutomationRequest, TestRunAutomationRequest, TestRunAutomationResponse,
         UpdateAutomationStatusRequest,
     },
@@ -190,6 +190,29 @@ pub async fn list_alerts(
     let user_id = authenticated_user_id(&state, &headers).await?;
     let alerts = state.automation_service.alerts(&user_id).await?;
     Ok(ok("Automation alerts fetched successfully", alerts))
+}
+
+#[utoipa::path(
+    delete,
+    path = "/api/v1/automation-alerts",
+    tag = "Builder",
+    security(("bearer_auth" = [])),
+    responses(
+        (status = 200, description = "Automation alerts cleared", body = ApiResponse<ClearAlertsResponse>),
+        (status = 401, description = "Missing or invalid bearer token", body = ErrorResponse)
+    )
+)]
+pub async fn clear_alerts(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<ApiResponse<ClearAlertsResponse>>, AppError> {
+    let user_id = authenticated_user_id(&state, &headers).await?;
+    let deleted = state.automation_service.clear_alerts(&user_id).await?;
+
+    Ok(ok(
+        "Automation alerts cleared",
+        ClearAlertsResponse { deleted },
+    ))
 }
 
 #[utoipa::path(

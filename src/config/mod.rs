@@ -6,6 +6,7 @@ pub struct AppConfig {
     pub database_url: String,
     pub credential_encryption_key: String,
     pub app_base_url: String,
+    pub polymarket_clob_host: String,
     pub polymarket_gamma_host: String,
 }
 
@@ -19,6 +20,8 @@ impl AppConfig {
                 .expect("CREDENTIAL_ENCRYPTION_KEY must be set"),
             app_base_url: env::var("APP_BASE_URL")
                 .unwrap_or_else(|_| "http://localhost:5173".to_owned()),
+            polymarket_clob_host: env::var("POLYMARKET_CLOB_HOST")
+                .unwrap_or_else(|_| "https://clob.polymarket.com".to_owned()),
             polymarket_gamma_host: env::var("POLYMARKET_GAMMA_HOST")
                 .unwrap_or_else(|_| "https://gamma-api.polymarket.com".to_owned()),
         }
