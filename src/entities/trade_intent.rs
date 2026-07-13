@@ -23,12 +23,17 @@ pub struct Model {
     pub wallet_address: String,
     pub status: String,
     pub signed_order: Option<Value>,
+    pub signed_order_hash: Option<String>,
+    pub defer_exec: bool,
+    pub post_only: bool,
     pub provider_response: Option<Value>,
     pub provider_order_id: Option<String>,
     pub error: Option<String>,
     pub created_at: DateTimeWithTimeZone,
     pub updated_at: DateTimeWithTimeZone,
     pub submitted_at: Option<DateTimeWithTimeZone>,
+    pub submission_started_at: Option<DateTimeWithTimeZone>,
+    pub reconciliation_checked_at: Option<DateTimeWithTimeZone>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

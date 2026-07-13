@@ -15,7 +15,7 @@ use crate::{
         TestRunAutomationResponse, WorkflowActionType, WorkflowPayload,
     },
     db::Db,
-    entities::{automation, automation_alert, user},
+    entities::{automation, automation_alert, automation_observation, user},
     error::AppError,
     notifications::{dto::AutomationAlertStreamEvent, service::NotificationService},
     venue::SupportedVenue,
@@ -143,6 +143,10 @@ impl AutomationService {
         active.status = Set("active".to_owned());
         active.updated_at = Set(Utc::now().into());
         let model = active.update(&self.db).await?;
+        automation_observation::Entity::delete_many()
+            .filter(automation_observation::Column::AutomationId.eq(automation_id))
+            .exec(&self.db)
+            .await?;
         let response = automation_response(model);
         self.create_alert(
             user_id,
@@ -313,13 +317,13 @@ impl AutomationService {
         let automation_id = clean_optional(payload.automation_id);
         let title = clean_title(&payload.title)?;
         let message = format!(
-            "Test run completed successfully for {title} with {checked_blocks} workflow steps."
+            "Workflow validation completed for {title} with {checked_blocks} steps. No actions were performed."
         );
         let alert = self
             .create_alert(
                 user_id,
                 automation_id.clone(),
-                "Test run completed",
+                "Workflow validation completed",
                 &message,
                 "success",
                 json!({
@@ -329,16 +333,6 @@ impl AutomationService {
                 }),
             )
             .await?;
-
-        if let Some(id) = automation_id {
-            if let Ok(model) = self.find_owned_automation(user_id, &id).await {
-                let mut active = model.into_active_model();
-                active.last_run_status = Set(Some("success".to_owned()));
-                active.last_run_at = Set(Some(Utc::now().into()));
-                active.updated_at = Set(Utc::now().into());
-                active.update(&self.db).await?;
-            }
-        }
 
         Ok(TestRunAutomationResponse {
             status: "success".to_owned(),
@@ -464,13 +458,15 @@ fn validate_workflow(workflow: &WorkflowPayload) -> Result<(), AppError> {
         validate_params(step.action, &step.params)?;
     }
 
-    if !workflow
+    if workflow
         .steps
         .iter()
-        .any(|step| step.kind == AutomationStepKind::Trigger)
+        .filter(|step| step.kind == AutomationStepKind::Trigger)
+        .count()
+        != 1
     {
         return Err(AppError::BadRequest(
-            "workflow must contain at least one trigger".to_owned(),
+            "workflow must contain exactly one trigger".to_owned(),
         ));
     }
 
@@ -546,13 +542,7 @@ fn validate_connections(workflow: &WorkflowPayload, ids: &HashSet<&str>) -> Resu
         ));
     }
 
-    if workflow.steps.len() > 1 && has_disconnected_steps(workflow) {
-        return Err(AppError::BadRequest(
-            "connect all workflow steps into one executable path".to_owned(),
-        ));
-    }
-
-    Ok(())
+    validate_linear_path(workflow)
 }
 
 fn validate_action_kind(
@@ -593,7 +583,11 @@ fn validate_params(action: WorkflowActionType, params: &Value) -> Result<(), App
             )?;
         }
         WorkflowActionType::TriggerTimeCheck => {
-            non_empty_string(params, "interval", "interval is required")?;
+            string_enum(
+                params,
+                "interval",
+                &["5m", "15m", "30m", "1h", "4h", "12h", "24h"],
+            )?;
         }
         WorkflowActionType::ConditionOutcomePriceAbove => {
             string_enum(params, "outcome", &["YES", "NO"])?;
@@ -609,10 +603,17 @@ fn validate_params(action: WorkflowActionType, params: &Value) -> Result<(), App
             string_enum(params, "operator", &["ABOVE"])?;
             positive_number(params, "volume", "volume must be positive")?;
         }
-        WorkflowActionType::Buy | WorkflowActionType::Sell => {
+        WorkflowActionType::Buy => {
             string_enum(params, "outcome", &["YES", "NO"])?;
-            string_enum(params, "order_type", &["MARKET", "LIMIT"])?;
-            positive_number(params, "amount", "amount must be positive")?;
+            string_enum(params, "order_type", &["LIMIT"])?;
+            positive_number(params, "usdc_amount", "usdc_amount must be positive")?;
+            probability(params, "limit_price")?;
+        }
+        WorkflowActionType::Sell => {
+            string_enum(params, "outcome", &["YES", "NO"])?;
+            string_enum(params, "order_type", &["LIMIT"])?;
+            positive_number(params, "shares", "shares must be positive")?;
+            probability(params, "limit_price")?;
         }
         WorkflowActionType::SendMessage => {
             string_enum(params, "channel", &["IN_APP"])?;
@@ -673,18 +674,75 @@ fn visit<'a>(
     false
 }
 
-fn has_disconnected_steps(workflow: &WorkflowPayload) -> bool {
-    let mut connected = HashSet::new();
-
-    for connection in &workflow.connections {
-        connected.insert(connection.from.as_str());
-        connected.insert(connection.to.as_str());
+fn validate_linear_path(workflow: &WorkflowPayload) -> Result<(), AppError> {
+    if workflow.connections.len() + 1 != workflow.steps.len() {
+        return Err(AppError::BadRequest(
+            "workflow must be one linear path without branches".to_owned(),
+        ));
     }
 
-    workflow
+    let mut incoming = HashMap::<&str, usize>::new();
+    let mut outgoing = HashMap::<&str, &str>::new();
+
+    for step in &workflow.steps {
+        incoming.insert(step.id.as_str(), 0);
+    }
+
+    for connection in &workflow.connections {
+        let count = incoming.entry(connection.to.as_str()).or_default();
+        *count += 1;
+
+        if *count > 1 || outgoing.insert(&connection.from, &connection.to).is_some() {
+            return Err(AppError::BadRequest(
+                "workflow must be one linear path without branches".to_owned(),
+            ));
+        }
+    }
+
+    let roots = workflow
         .steps
         .iter()
-        .any(|step| !connected.contains(step.id.as_str()))
+        .filter(|step| incoming.get(step.id.as_str()) == Some(&0))
+        .collect::<Vec<_>>();
+    let sinks = workflow
+        .steps
+        .iter()
+        .filter(|step| !outgoing.contains_key(step.id.as_str()))
+        .collect::<Vec<_>>();
+
+    if roots.len() != 1
+        || roots[0].kind != AutomationStepKind::Trigger
+        || sinks.len() != 1
+        || sinks[0].kind != AutomationStepKind::Action
+    {
+        return Err(AppError::BadRequest(
+            "workflow must be one linear path from a trigger to an action".to_owned(),
+        ));
+    }
+
+    let mut visited = HashSet::new();
+    let mut current = roots[0].id.as_str();
+
+    loop {
+        if !visited.insert(current) {
+            return Err(AppError::BadRequest(
+                "workflow cannot contain loops".to_owned(),
+            ));
+        }
+
+        let Some(next) = outgoing.get(current) else {
+            break;
+        };
+        current = *next;
+    }
+
+    if visited.len() != workflow.steps.len() {
+        return Err(AppError::BadRequest(
+            "connect all workflow steps into one executable path".to_owned(),
+        ));
+    }
+
+    Ok(())
 }
 
 fn validate_provider(provider: AutomationProvider) -> Result<(), AppError> {

@@ -10,8 +10,8 @@ use crate::{
     error::{AppError, ErrorResponse},
     response::{ApiResponse, ok},
     trades::dto::{
-        CreateTradeIntentRequest, CreateTradeIntentResponse, SubmitSignedTradeRequest,
-        SubmitSignedTradeResponse, TradeIntentResponse,
+        CreateTradeIntentRequest, CreateTradeIntentResponse, ReconcileTradeResponse,
+        SubmitSignedTradeRequest, SubmitSignedTradeResponse, TradeIntentResponse,
     },
 };
 
@@ -110,6 +110,30 @@ pub async fn submit_signed_trade(
         .await?;
 
     Ok(ok("Signed trade submitted to Polymarket", response))
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/v1/trades/{trade_id}/reconcile",
+    tag = "Trades",
+    security(("bearer_auth" = [])),
+    params(("trade_id" = String, Path, description = "Trade id")),
+    responses(
+        (status = 200, description = "Trade marked or confirmed as requiring manual reconciliation", body = ApiResponse<ReconcileTradeResponse>),
+        (status = 401, description = "Missing or invalid bearer token", body = ErrorResponse),
+        (status = 409, description = "Trade does not require reconciliation or submission is still active", body = ErrorResponse),
+        (status = 404, description = "Trade not found", body = ErrorResponse)
+    )
+)]
+pub async fn reconcile_trade(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(trade_id): Path<String>,
+) -> Result<Json<ApiResponse<ReconcileTradeResponse>>, AppError> {
+    let user_id = authenticated_user_id(&state, &headers).await?;
+    let response = state.trade_service.reconcile(&user_id, &trade_id).await?;
+
+    Ok(ok("Trade reconciliation state checked", response))
 }
 
 async fn authenticated_user_id(state: &AppState, headers: &HeaderMap) -> Result<String, AppError> {

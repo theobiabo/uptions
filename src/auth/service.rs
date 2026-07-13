@@ -18,13 +18,13 @@ use uuid::Uuid;
 use crate::{
     auth::dto::{
         AuthSessionResponse, AuthUserResponse, ConnectPolymarketRequest, CreateChallengeResponse,
-        ForgotPasswordRequest, LoginRequest, ResetPasswordRequest, SettingsUpdateResponse,
-        SignupRequest, UpdateEmailRequest, UpdatePasswordRequest, VenueConnectionResponse,
-        VerifyChallengeResponse,
+        ForgotPasswordRequest, LoginRequest, LogoutResponse, ResetPasswordRequest,
+        SettingsUpdateResponse, SignupRequest, UpdateEmailRequest, UpdatePasswordRequest,
+        VenueConnectionResponse, VerifyChallengeResponse, WalletChallengeResponse,
     },
     automations::dto::AutomationProvider,
     db::Db,
-    entities::{auth_method, user, user_session, venue_connection},
+    entities::{auth_method, user, user_session, venue_connection, wallet_signature_challenge},
     error::AppError,
     libs::{
         credentials::{encrypt_json, parse_encryption_key},
@@ -34,11 +34,13 @@ use crate::{
 };
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, EntityTrait, IntoActiveModel, QueryFilter, Set, SqlErr,
-    sea_query::OnConflict,
+    TransactionTrait, sea_query::OnConflict,
 };
 use serde_json::{Value, json};
 
 const CHALLENGE_TTL_SECONDS: u64 = 300;
+const WALLET_ASSOCIATION_PURPOSE: &str = "associate_wallet";
+const POLYGON_CHAIN_ID: u64 = 137;
 const SESSION_TTL_SECONDS: u64 = 60 * 60 * 24 * 30;
 const EMAIL_VERIFICATION_TTL_SECONDS: u64 = 60 * 60 * 24;
 const PASSWORD_RESET_TTL_SECONDS: u64 = 60 * 60;
@@ -109,6 +111,52 @@ impl AuthService {
             .insert(wallet_address.clone(), record);
 
         Ok(CreateChallengeResponse {
+            wallet_address,
+            nonce,
+            message,
+            expires_at,
+        })
+    }
+
+    pub async fn create_wallet_challenge(
+        &self,
+        access_token: &str,
+        wallet_address: &str,
+        chain_id: u64,
+    ) -> Result<WalletChallengeResponse, AppError> {
+        if chain_id != POLYGON_CHAIN_ID {
+            return Err(AppError::BadRequest(
+                "wallet association requires Polygon chain ID 137".to_owned(),
+            ));
+        }
+
+        let user_id = self.session(access_token).await?.user_id;
+        let wallet_address = normalize_wallet_address(wallet_address)?;
+        self.ensure_wallet_available(&user_id, &wallet_address)
+            .await?;
+
+        let nonce = Uuid::new_v4().to_string();
+        let expires_at = unix_timestamp() + CHALLENGE_TTL_SECONDS;
+        let message = wallet_association_message(&user_id, &wallet_address, &nonce, expires_at);
+
+        wallet_signature_challenge::ActiveModel {
+            id: Set(Uuid::new_v4().to_string()),
+            user_id: Set(user_id),
+            purpose: Set(WALLET_ASSOCIATION_PURPOSE.to_owned()),
+            chain_id: Set(POLYGON_CHAIN_ID as i64),
+            wallet_address: Set(wallet_address.clone()),
+            nonce_hash: Set(hash_access_token(&nonce)),
+            expires_at: Set(DateTime::<Utc>::from_timestamp(expires_at as i64, 0)
+                .expect("wallet challenge expiry must be a valid timestamp")
+                .into()),
+            ..Default::default()
+        }
+        .insert(&self.db)
+        .await?;
+
+        Ok(WalletChallengeResponse {
+            purpose: WALLET_ASSOCIATION_PURPOSE.to_owned(),
+            chain_id: POLYGON_CHAIN_ID,
             wallet_address,
             nonce,
             message,
@@ -267,12 +315,18 @@ impl AuthService {
             return Err(AppError::BadRequest("reset link has expired".to_owned()));
         }
 
+        let txn = self.db.begin().await?;
         let mut active = user.into_active_model();
         active.password_hash = Set(Some(hash_password(&payload.password)?));
         active.password_reset_token_hash = Set(None);
         active.password_reset_expires_at = Set(None);
         active.email_verified_at = Set(Some(Utc::now().into()));
-        let user = active.update(&self.db).await?;
+        let user = active.update(&txn).await?;
+        user_session::Entity::delete_many()
+            .filter(user_session::Column::UserId.eq(&user.id))
+            .exec(&txn)
+            .await?;
+        txn.commit().await?;
 
         self.issue_session(user).await
     }
@@ -311,6 +365,149 @@ impl AuthService {
             token_type: "Bearer".to_owned(),
             user: self.auth_user_response(&user).await?,
         })
+    }
+
+    pub async fn associate_wallet(
+        &self,
+        access_token: &str,
+        wallet_address: &str,
+        chain_id: u64,
+        nonce: &str,
+        signature: &str,
+    ) -> Result<String, AppError> {
+        if chain_id != POLYGON_CHAIN_ID {
+            return Err(AppError::BadRequest(
+                "wallet association requires Polygon chain ID 137".to_owned(),
+            ));
+        }
+
+        let user_id = self.session(access_token).await?.user_id;
+        let wallet_address = normalize_wallet_address(wallet_address)?;
+        let nonce = normalize_token(nonce)?;
+        let challenge = wallet_signature_challenge::Entity::find()
+            .filter(wallet_signature_challenge::Column::NonceHash.eq(hash_access_token(nonce)))
+            .one(&self.db)
+            .await?
+            .ok_or_else(invalid_wallet_challenge)?;
+        let expires_at = challenge.expires_at.with_timezone(&Utc);
+
+        if challenge.user_id != user_id
+            || challenge.purpose != WALLET_ASSOCIATION_PURPOSE
+            || challenge.chain_id != POLYGON_CHAIN_ID as i64
+            || challenge.wallet_address != wallet_address
+            || challenge.used_at.is_some()
+            || expires_at <= Utc::now()
+        {
+            return Err(invalid_wallet_challenge());
+        }
+
+        let expires_at_unix = expires_at.timestamp() as u64;
+        let message = wallet_association_message(&user_id, &wallet_address, nonce, expires_at_unix);
+        let recovered_address = recover_wallet_address(&message, signature)?;
+        if recovered_address != wallet_address {
+            return Err(AppError::Unauthorized);
+        }
+
+        let txn = self.db.begin().await?;
+        let now = Utc::now();
+        let consumed = wallet_signature_challenge::Entity::update_many()
+            .set(wallet_signature_challenge::ActiveModel {
+                used_at: Set(Some(now.into())),
+                updated_at: Set(now.into()),
+                ..Default::default()
+            })
+            .filter(wallet_signature_challenge::Column::Id.eq(challenge.id))
+            .filter(wallet_signature_challenge::Column::UsedAt.is_null())
+            .filter(wallet_signature_challenge::Column::ExpiresAt.gt(now))
+            .exec(&txn)
+            .await?;
+
+        if consumed.rows_affected != 1 {
+            return Err(invalid_wallet_challenge());
+        }
+
+        if user::Entity::find()
+            .filter(user::Column::PrimaryWalletAddress.eq(Some(wallet_address.clone())))
+            .filter(user::Column::Id.ne(&user_id))
+            .one(&txn)
+            .await?
+            .is_some()
+            || auth_method::Entity::find()
+                .filter(auth_method::Column::MethodType.eq("wallet"))
+                .filter(auth_method::Column::ExternalId.eq(&wallet_address))
+                .filter(auth_method::Column::UserId.ne(&user_id))
+                .one(&txn)
+                .await?
+                .is_some()
+        {
+            return Err(AppError::Conflict(
+                "wallet is already associated with another account".to_owned(),
+            ));
+        }
+
+        let model = user::Entity::find_by_id(&user_id)
+            .one(&txn)
+            .await?
+            .ok_or(AppError::Unauthorized)?;
+        let mut active = model.into_active_model();
+        active.primary_wallet_address = Set(Some(wallet_address.clone()));
+        active.updated_at = Set(now.into());
+        active
+            .update(&txn)
+            .await
+            .map_err(wallet_association_error)?;
+
+        if let Some(model) = auth_method::Entity::find()
+            .filter(auth_method::Column::UserId.eq(&user_id))
+            .filter(auth_method::Column::MethodType.eq("wallet"))
+            .one(&txn)
+            .await?
+        {
+            let mut active = model.into_active_model();
+            active.external_id = Set(wallet_address.clone());
+            active.updated_at = Set(now.into());
+            active
+                .update(&txn)
+                .await
+                .map_err(wallet_association_error)?;
+        } else {
+            auth_method::ActiveModel {
+                id: Set(Uuid::new_v4().to_string()),
+                user_id: Set(user_id),
+                method_type: Set("wallet".to_owned()),
+                external_id: Set(wallet_address.clone()),
+                meta: Set(json!({
+                    "chain_id": POLYGON_CHAIN_ID,
+                    "verified_by": WALLET_ASSOCIATION_PURPOSE
+                })),
+                ..Default::default()
+            }
+            .insert(&txn)
+            .await
+            .map_err(wallet_association_error)?;
+        }
+
+        txn.commit().await?;
+        Ok(wallet_address)
+    }
+
+    pub async fn logout(&self, access_token: &str) -> Result<LogoutResponse, AppError> {
+        self.session(access_token).await?;
+        let result = user_session::Entity::delete_many()
+            .filter(user_session::Column::TokenHash.eq(hash_access_token(access_token)))
+            .exec(&self.db)
+            .await?;
+
+        Ok(LogoutResponse {
+            revoked_sessions: result.rows_affected,
+        })
+    }
+
+    pub async fn logout_all(&self, access_token: &str) -> Result<LogoutResponse, AppError> {
+        let user_id = self.session(access_token).await?.user_id;
+        let revoked_sessions = self.revoke_user_sessions(&user_id).await?;
+
+        Ok(LogoutResponse { revoked_sessions })
     }
 
     pub async fn current_user_id(&self, access_token: &str) -> Result<String, AppError> {
@@ -400,13 +597,19 @@ impl AuthService {
         }
 
         validate_password(&payload.new_password)?;
+        let txn = self.db.begin().await?;
         let mut active = model.into_active_model();
         active.password_hash = Set(Some(hash_password(&payload.new_password)?));
         active.updated_at = Set(Utc::now().into());
-        active.update(&self.db).await?;
+        active.update(&txn).await?;
+        user_session::Entity::delete_many()
+            .filter(user_session::Column::UserId.eq(&session.user_id))
+            .exec(&txn)
+            .await?;
+        txn.commit().await?;
 
         Ok(SettingsUpdateResponse {
-            message: "Password updated successfully".to_owned(),
+            message: "Password updated successfully. Sign in again on your devices.".to_owned(),
         })
     }
 
@@ -493,6 +696,41 @@ impl AuthService {
         };
 
         Ok(venue_connection_response(connection))
+    }
+
+    async fn ensure_wallet_available(
+        &self,
+        user_id: &str,
+        wallet_address: &str,
+    ) -> Result<(), AppError> {
+        let assigned_user = user::Entity::find()
+            .filter(user::Column::PrimaryWalletAddress.eq(Some(wallet_address.to_owned())))
+            .one(&self.db)
+            .await?;
+        let assigned_method = auth_method::Entity::find()
+            .filter(auth_method::Column::MethodType.eq("wallet"))
+            .filter(auth_method::Column::ExternalId.eq(wallet_address))
+            .one(&self.db)
+            .await?;
+
+        if assigned_user.is_some_and(|model| model.id != user_id)
+            || assigned_method.is_some_and(|model| model.user_id != user_id)
+        {
+            return Err(AppError::Conflict(
+                "wallet is already associated with another account".to_owned(),
+            ));
+        }
+
+        Ok(())
+    }
+
+    async fn revoke_user_sessions(&self, user_id: &str) -> Result<u64, AppError> {
+        let result = user_session::Entity::delete_many()
+            .filter(user_session::Column::UserId.eq(user_id))
+            .exec(&self.db)
+            .await?;
+
+        Ok(result.rows_affected)
     }
 
     async fn session(&self, access_token: &str) -> Result<SessionRecord, AppError> {
@@ -687,6 +925,30 @@ impl AuthService {
 struct CreatedSession {
     access_token: String,
     expires_at: i64,
+}
+
+fn wallet_association_message(
+    user_id: &str,
+    wallet_address: &str,
+    nonce: &str,
+    expires_at: u64,
+) -> String {
+    format!(
+        "Uptions Wallet Association\nPurpose: {WALLET_ASSOCIATION_PURPOSE}\nUser ID: {user_id}\nChain ID: {POLYGON_CHAIN_ID}\nWallet: {wallet_address}\nNonce: {nonce}\nExpires At: {expires_at}"
+    )
+}
+
+fn invalid_wallet_challenge() -> AppError {
+    AppError::BadRequest("wallet challenge is invalid, expired, or already used".to_owned())
+}
+
+fn wallet_association_error(error: sea_orm::DbErr) -> AppError {
+    match error.sql_err() {
+        Some(SqlErr::UniqueConstraintViolation(_)) => {
+            AppError::Conflict("wallet is already associated with another account".to_owned())
+        }
+        _ => AppError::DatabaseError(error.to_string()),
+    }
 }
 
 fn venue_connection_response(model: venue_connection::Model) -> VenueConnectionResponse {
@@ -1046,7 +1308,56 @@ fn encode_hex(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{RESERVED_USERNAMES, normalize_username};
+    use k256::ecdsa::SigningKey;
+
+    use super::{
+        POLYGON_CHAIN_ID, RESERVED_USERNAMES, encode_hex, ethereum_message_digest,
+        normalize_username, recover_wallet_address, verifying_key_to_address,
+        wallet_association_message,
+    };
+
+    #[test]
+    fn wallet_association_message_binds_identity_context() {
+        let message = wallet_association_message(
+            "user-123",
+            "0x1111111111111111111111111111111111111111",
+            "nonce-456",
+            1_760_000_000,
+        );
+
+        assert_eq!(
+            message,
+            format!(
+                "Uptions Wallet Association\nPurpose: associate_wallet\nUser ID: user-123\nChain ID: {POLYGON_CHAIN_ID}\nWallet: 0x1111111111111111111111111111111111111111\nNonce: nonce-456\nExpires At: 1760000000"
+            )
+        );
+    }
+
+    #[test]
+    fn wallet_signature_cannot_be_reused_for_another_nonce() {
+        let signing_key = SigningKey::from_bytes(&[7u8; 32].into()).unwrap();
+        let wallet_address = verifying_key_to_address(signing_key.verifying_key());
+        let message =
+            wallet_association_message("user-123", &wallet_address, "nonce-456", 1_760_000_000);
+        let (signature, recovery_id) = signing_key
+            .sign_digest_recoverable(ethereum_message_digest(&message))
+            .unwrap();
+        let mut signature_bytes = signature.to_bytes().to_vec();
+        signature_bytes.push(recovery_id.to_byte() + 27);
+        let signature = format!("0x{}", encode_hex(&signature_bytes));
+
+        assert_eq!(
+            recover_wallet_address(&message, &signature).unwrap(),
+            wallet_address
+        );
+
+        let altered_message =
+            wallet_association_message("user-123", &wallet_address, "nonce-789", 1_760_000_000);
+        assert_ne!(
+            recover_wallet_address(&altered_message, &signature).unwrap(),
+            wallet_address
+        );
+    }
 
     #[test]
     fn username_is_trimmed_and_lowercased() {

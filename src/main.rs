@@ -1,3 +1,5 @@
+use std::net::SocketAddr;
+
 use tokio::net::TcpListener;
 use tracing::info;
 use tracing_subscriber::{EnvFilter, fmt};
@@ -19,7 +21,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     info!("Application is running on {}", address);
 
-    axum::serve(listener, app).await.expect("failed to serve");
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await
+    .expect("failed to serve");
 
     Ok(())
 }
