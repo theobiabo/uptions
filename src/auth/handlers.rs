@@ -25,7 +25,7 @@ use crate::{
     responses(
         (status = 200, description = "Account created and verification email sent", body = ApiResponse<AuthUserResponse>),
         (status = 400, description = "Invalid signup payload", body = ErrorResponse),
-        (status = 409, description = "Email already registered", body = ErrorResponse)
+        (status = 409, description = "Email or username already registered", body = ErrorResponse)
     )
 )]
 pub async fn signup(

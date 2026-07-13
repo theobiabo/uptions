@@ -33,7 +33,7 @@ use crate::{
     venue::SupportedVenue,
 };
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, EntityTrait, IntoActiveModel, QueryFilter, Set,
+    ActiveModelTrait, ColumnTrait, EntityTrait, IntoActiveModel, QueryFilter, Set, SqlErr,
     sea_query::OnConflict,
 };
 use serde_json::{Value, json};
@@ -43,6 +43,19 @@ const SESSION_TTL_SECONDS: u64 = 60 * 60 * 24 * 30;
 const EMAIL_VERIFICATION_TTL_SECONDS: u64 = 60 * 60 * 24;
 const PASSWORD_RESET_TTL_SECONDS: u64 = 60 * 60;
 const MIN_PASSWORD_LENGTH: usize = 8;
+const MIN_USERNAME_LENGTH: usize = 3;
+const MAX_USERNAME_LENGTH: usize = 20;
+const RESERVED_USERNAMES: [&str; 9] = [
+    "admin",
+    "administrator",
+    "api",
+    "support",
+    "uptions",
+    "root",
+    "system",
+    "settings",
+    "profile",
+];
 
 #[derive(Clone)]
 pub struct AuthService {
@@ -105,15 +118,27 @@ impl AuthService {
 
     pub async fn signup(&self, payload: SignupRequest) -> Result<AuthUserResponse, AppError> {
         let email = normalize_email(&payload.email)?;
+        let username = normalize_username(&payload.username)?;
         validate_password(&payload.password)?;
 
-        let existing = user::Entity::find()
+        let existing_email = user::Entity::find()
             .filter(user::Column::Email.eq(Some(email.clone())))
             .one(&self.db)
             .await?;
 
-        if existing.is_some() {
+        if existing_email.is_some() {
             return Err(AppError::Conflict("email is already registered".to_owned()));
+        }
+
+        let existing_username = user::Entity::find()
+            .filter(user::Column::Username.eq(Some(username.clone())))
+            .one(&self.db)
+            .await?;
+
+        if existing_username.is_some() {
+            return Err(AppError::Conflict(
+                "username is already registered".to_owned(),
+            ));
         }
 
         let password_hash = hash_password(&payload.password)?;
@@ -124,13 +149,20 @@ impl AuthService {
         let user = user::ActiveModel {
             id: Set(user_id.clone()),
             email: Set(Some(email.clone())),
+            username: Set(Some(username)),
             password_hash: Set(Some(password_hash)),
             email_verification_token_hash: Set(Some(hash_access_token(&verification_token))),
             email_verification_expires_at: Set(Some(verification_expires_at.into())),
             ..Default::default()
         }
         .insert(&self.db)
-        .await?;
+        .await
+        .map_err(|error| match error.sql_err() {
+            Some(SqlErr::UniqueConstraintViolation(_)) => {
+                AppError::Conflict("email or username is already registered".to_owned())
+            }
+            _ => AppError::DatabaseError(error.to_string()),
+        })?;
 
         self.ensure_email_auth_method(&user_id, &email).await?;
         self.send_verification_email(&email, &verification_token)
@@ -640,6 +672,7 @@ impl AuthService {
             primary_wallet_address: user.primary_wallet_address.clone(),
             wallet_address: user.primary_wallet_address.clone(),
             email: user.email.clone(),
+            username: user.username.clone(),
             email_verified: user.email.is_none() || user.email_verified_at.is_some(),
             password_configured: user.password_hash.is_some(),
             preferred_trading_provider: user
@@ -693,6 +726,51 @@ pub fn normalize_email(email: &str) -> Result<String, AppError> {
     }
 
     Ok(email)
+}
+
+pub fn normalize_username(username: &str) -> Result<String, AppError> {
+    let username = username.trim().to_ascii_lowercase();
+
+    if !(MIN_USERNAME_LENGTH..=MAX_USERNAME_LENGTH).contains(&username.len())
+        || !username.is_ascii()
+    {
+        return Err(AppError::BadRequest(format!(
+            "username must be {MIN_USERNAME_LENGTH}-{MAX_USERNAME_LENGTH} ASCII characters"
+        )));
+    }
+
+    if !username.as_bytes()[0].is_ascii_lowercase() {
+        return Err(AppError::BadRequest(
+            "username must start with a letter".to_owned(),
+        ));
+    }
+
+    if !username
+        .bytes()
+        .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+    {
+        return Err(AppError::BadRequest(
+            "username may only contain lowercase letters, digits, and underscores".to_owned(),
+        ));
+    }
+
+    if username.ends_with('_') {
+        return Err(AppError::BadRequest(
+            "username must not end with an underscore".to_owned(),
+        ));
+    }
+
+    if username.contains("__") {
+        return Err(AppError::BadRequest(
+            "username must not contain consecutive underscores".to_owned(),
+        ));
+    }
+
+    if RESERVED_USERNAMES.contains(&username.as_str()) {
+        return Err(AppError::BadRequest("username is reserved".to_owned()));
+    }
+
+    Ok(username)
 }
 
 pub fn validate_password(password: &str) -> Result<(), AppError> {
@@ -964,4 +1042,52 @@ fn encode_hex(bytes: &[u8]) -> String {
     }
 
     output
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{RESERVED_USERNAMES, normalize_username};
+
+    #[test]
+    fn username_is_trimmed_and_lowercased() {
+        assert_eq!(normalize_username("  Alice_123  ").unwrap(), "alice_123");
+    }
+
+    #[test]
+    fn username_accepts_valid_boundaries_and_characters() {
+        assert_eq!(normalize_username("abc").unwrap(), "abc");
+        assert_eq!(normalize_username("a1_b2").unwrap(), "a1_b2");
+        assert_eq!(
+            normalize_username("abcdefghijklmnopqrst").unwrap(),
+            "abcdefghijklmnopqrst"
+        );
+    }
+
+    #[test]
+    fn username_rejects_invalid_lengths_and_non_ascii() {
+        assert!(normalize_username("ab").is_err());
+        assert!(normalize_username("abcdefghijklmnopqrstu").is_err());
+        assert!(normalize_username("josé").is_err());
+    }
+
+    #[test]
+    fn username_rejects_invalid_start_and_characters() {
+        assert!(normalize_username("1alice").is_err());
+        assert!(normalize_username("_alice").is_err());
+        assert!(normalize_username("alice-smith").is_err());
+        assert!(normalize_username("alice smith").is_err());
+    }
+
+    #[test]
+    fn username_rejects_invalid_underscore_placement() {
+        assert!(normalize_username("alice_").is_err());
+        assert!(normalize_username("alice__smith").is_err());
+    }
+
+    #[test]
+    fn username_rejects_reserved_names_after_normalization() {
+        for username in RESERVED_USERNAMES {
+            assert!(normalize_username(&format!(" {username} ")).is_err());
+        }
+    }
 }

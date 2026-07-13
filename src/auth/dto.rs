@@ -10,6 +10,8 @@ pub struct SignupRequest {
     pub email: String,
     #[schema(example = "correct horse battery staple")]
     pub password: String,
+    #[schema(example = "uptions_user")]
+    pub username: String,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -101,6 +103,8 @@ pub struct AuthUserResponse {
     pub wallet_address: Option<String>,
     #[schema(example = "user@uptions.com")]
     pub email: Option<String>,
+    #[schema(example = "uptions_user")]
+    pub username: Option<String>,
     #[schema(example = true)]
     pub email_verified: bool,
     #[schema(example = true)]

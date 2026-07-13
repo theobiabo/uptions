@@ -9,6 +9,8 @@ pub struct Model {
     pub primary_wallet_address: Option<String>,
     pub password_hash: Option<String>,
     pub email: Option<String>,
+    #[sea_orm(unique)]
+    pub username: Option<String>,
     pub email_verified_at: Option<DateTimeWithTimeZone>,
     pub email_verification_token_hash: Option<String>,
     pub email_verification_expires_at: Option<DateTimeWithTimeZone>,
