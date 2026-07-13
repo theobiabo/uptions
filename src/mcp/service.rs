@@ -550,7 +550,7 @@ async fn execute_approved_tool(
             let args: AutomationToolPayload = parse_params(payload, "Invalid automation payload")?;
             let automation = state
                 .automation_service
-                .publish(user_id, publish_request(args))
+                .publish(user_id, publish_request(args), None)
                 .await?;
             Ok(json!({ "automation": automation }))
         }

@@ -1,3 +1,4 @@
+pub mod analytics;
 pub mod app;
 pub mod auth;
 pub mod automations;

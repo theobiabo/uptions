@@ -13,6 +13,7 @@ use tower_http::{
 use tracing::Level;
 
 use crate::{
+    analytics::handlers::analytics_overview,
     app::docs::swagger_ui,
     app::state::AppState,
     auth::handlers::{
@@ -60,6 +61,7 @@ fn api_v1_router() -> Router<AppState> {
         .route("/auth/verify", post(verify_challenge))
         .route("/auth/me", get(current_user))
         .route("/venue-connections/polymarket", post(connect_polymarket))
+        .route("/analytics/overview", get(analytics_overview))
         .route(
             "/automations",
             get(list_automations).post(publish_automation),

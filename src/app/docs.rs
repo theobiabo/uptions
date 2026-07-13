@@ -5,6 +5,10 @@ use utoipa::{
 use utoipa_swagger_ui::SwaggerUi;
 
 use crate::{
+    analytics::dto::{
+        AnalyticsCounts, AnalyticsOverviewResponse, DailyActivity, PerformanceAvailability,
+        PnlAvailability, StatusCount, WorkflowActivity,
+    },
     auth::dto::{
         AuthSessionResponse, AuthUserResponse, ConnectPolymarketRequest, CreateChallengeRequest,
         CreateChallengeResponse, ForgotPasswordRequest, LoginRequest, ResetPasswordRequest,
@@ -45,6 +49,7 @@ use crate::{
 #[openapi(
     paths(
         super::health_check,
+        crate::analytics::handlers::analytics_overview,
         crate::auth::handlers::signup,
         crate::auth::handlers::login,
         crate::auth::handlers::verify_email,
@@ -87,6 +92,14 @@ use crate::{
     ),
     components(
         schemas(
+            AnalyticsCounts,
+            AnalyticsOverviewResponse,
+            DailyActivity,
+            PerformanceAvailability,
+            PnlAvailability,
+            StatusCount,
+            WorkflowActivity,
+            ApiResponse<AnalyticsOverviewResponse>,
             AuthUserResponse,
             AuthSessionResponse,
             AutomationAlertResponse,

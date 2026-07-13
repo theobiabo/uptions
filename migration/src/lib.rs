@@ -16,6 +16,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260710_000001_automation_runs::Migration),
             Box::new(m20260710_000002_user_trading_provider::Migration),
             Box::new(m20260710_000003_trade_intents::Migration),
+            Box::new(m20260713_000001_automation_idempotency_key::Migration),
         ]
     }
 }
@@ -29,3 +30,4 @@ mod m20260709_000002_mcp_approval_requests;
 mod m20260710_000001_automation_runs;
 mod m20260710_000002_user_trading_provider;
 mod m20260710_000003_trade_intents;
+mod m20260713_000001_automation_idempotency_key;
