@@ -6,7 +6,7 @@ use base64::{
 };
 use chrono::Utc;
 use hmac::{Hmac, Mac};
-use reqwest::Client;
+use reqwest::{Client, StatusCode};
 use serde_json::{Value, json};
 use sha2::Sha256;
 
@@ -20,6 +20,14 @@ use crate::{
 };
 
 type HmacSha256 = Hmac<Sha256>;
+
+#[derive(Debug, thiserror::Error)]
+pub enum PolymarketSubmissionError {
+    #[error("{0}")]
+    Definite(String),
+    #[error("{0}")]
+    Ambiguous(String),
+}
 
 #[derive(Clone)]
 pub struct PolymarketClient {
@@ -140,11 +148,12 @@ impl PolymarketClient {
         &self,
         credentials: &PolymarketApiCredentials,
         payload: &PolymarketSignedOrderPayload,
-    ) -> Result<Value, AppError> {
+    ) -> Result<Value, PolymarketSubmissionError> {
         let endpoint = "/order";
-        let body = polymarket_order_payload(credentials, payload)?;
+        let body = polymarket_order_payload(credentials, payload)
+            .map_err(|error| PolymarketSubmissionError::Definite(error.to_string()))?;
         let body_text = serde_json::to_string(&body)
-            .map_err(|error| AppError::BadRequest(error.to_string()))?;
+            .map_err(|error| PolymarketSubmissionError::Definite(error.to_string()))?;
         let timestamp = unix_timestamp().to_string();
         let signature = polymarket_hmac_signature(
             &credentials.secret,
@@ -152,7 +161,8 @@ impl PolymarketClient {
             "POST",
             endpoint,
             Some(&body_text),
-        )?;
+        )
+        .map_err(|error| PolymarketSubmissionError::Definite(error.to_string()))?;
         let response = self
             .http_client
             .post(format!("{}{}", self.clob_host, endpoint))
@@ -165,7 +175,7 @@ impl PolymarketClient {
             .body(body_text)
             .send()
             .await
-            .map_err(|error| AppError::ExternalApiError(error.to_string()))?;
+            .map_err(|error| PolymarketSubmissionError::Ambiguous(error.to_string()))?;
 
         let status = response.status();
 
@@ -174,13 +184,13 @@ impl PolymarketClient {
                 .text()
                 .await
                 .unwrap_or_else(|_| "failed to read upstream response".to_owned());
-            return Err(AppError::ExternalApiError(body));
+            return Err(classify_submission_http_error(status, body));
         }
 
         response
             .json::<Value>()
             .await
-            .map_err(|error| AppError::ExternalApiError(error.to_string()))
+            .map_err(|error| PolymarketSubmissionError::Ambiguous(error.to_string()))
     }
 
     async fn fetch_tick_size(&self, token_id: &str) -> Result<String, AppError> {
@@ -243,6 +253,17 @@ impl PolymarketClient {
             .json::<Value>()
             .await
             .map_err(|error| AppError::ExternalApiError(error.to_string()))
+    }
+}
+
+fn classify_submission_http_error(
+    status: StatusCode,
+    message: String,
+) -> PolymarketSubmissionError {
+    if status.is_server_error() || status == StatusCode::REQUEST_TIMEOUT {
+        PolymarketSubmissionError::Ambiguous(message)
+    } else {
+        PolymarketSubmissionError::Definite(message)
     }
 }
 
@@ -379,7 +400,7 @@ fn normalize_order_book(token_id: &str, payload: Value) -> OrderBookResponse {
     let mut asks = levels_from_payload(&payload, "asks");
 
     bids.sort_by(|a, b| b.price.total_cmp(&a.price));
-    asks.sort_by(|a, b| b.price.total_cmp(&a.price));
+    asks.sort_by(|a, b| a.price.total_cmp(&b.price));
 
     let max_usd = bids
         .iter()
@@ -447,5 +468,56 @@ fn number_value(value: &Value) -> Option<f64> {
         Value::Number(number) => number.as_f64(),
         Value::String(text) => text.parse::<f64>().ok(),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use reqwest::StatusCode;
+
+    use super::{PolymarketSubmissionError, classify_submission_http_error, normalize_order_book};
+
+    #[test]
+    fn sorts_bids_descending_and_asks_ascending() {
+        let book = normalize_order_book(
+            "token",
+            json!({
+                "bids": [
+                    {"price": "0.40", "size": "10"},
+                    {"price": "0.60", "size": "5"}
+                ],
+                "asks": [
+                    {"price": "0.80", "size": "3"},
+                    {"price": "0.65", "size": "4"}
+                ]
+            }),
+        );
+
+        assert_eq!(book.bids[0].price, 0.60);
+        assert_eq!(book.asks[0].price, 0.65);
+        assert_eq!(book.best_bid, Some(0.60));
+        assert_eq!(book.best_ask, Some(0.65));
+        assert!((book.spread.unwrap() - 0.05).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn classifies_uncertain_http_submission_outcomes_for_reconciliation() {
+        assert!(matches!(
+            classify_submission_http_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "upstream".to_owned()
+            ),
+            PolymarketSubmissionError::Ambiguous(_)
+        ));
+        assert!(matches!(
+            classify_submission_http_error(StatusCode::REQUEST_TIMEOUT, "timeout".to_owned()),
+            PolymarketSubmissionError::Ambiguous(_)
+        ));
+        assert!(matches!(
+            classify_submission_http_error(StatusCode::BAD_REQUEST, "rejected".to_owned()),
+            PolymarketSubmissionError::Definite(_)
+        ));
     }
 }

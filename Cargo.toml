@@ -30,7 +30,8 @@ tokio = { version = "1.52.1", features = ["full"] }
 tokio-stream = { version = "0.1.17", features = ["sync"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
-tower-http = { version = "0.6.6", features = ["cors", "trace"] }
+tower = { version = "0.5.3", features = ["limit"] }
+tower-http = { version = "0.6.6", features = ["cors", "request-id", "trace"] }
 utoipa = { version = "5.4.0", features = ["axum_extras"] }
 utoipa-swagger-ui = { version = "9.0.2", features = ["axum"] }
 uuid = { version = "1.18.1", features = ["v4", "serde"] }

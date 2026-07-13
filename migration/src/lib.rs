@@ -18,6 +18,9 @@ impl MigratorTrait for Migrator {
             Box::new(m20260710_000003_trade_intents::Migration),
             Box::new(m20260713_000001_automation_idempotency_key::Migration),
             Box::new(m20260713_000002_usernames::Migration),
+            Box::new(m20260713_000003_automation_observations::Migration),
+            Box::new(m20260713_000004_wallet_signature_challenges::Migration),
+            Box::new(m20260713_000005_trade_submission_hardening::Migration),
         ]
     }
 }
@@ -33,3 +36,6 @@ mod m20260710_000002_user_trading_provider;
 mod m20260710_000003_trade_intents;
 mod m20260713_000001_automation_idempotency_key;
 mod m20260713_000002_usernames;
+mod m20260713_000003_automation_observations;
+mod m20260713_000004_wallet_signature_challenges;
+mod m20260713_000005_trade_submission_hardening;

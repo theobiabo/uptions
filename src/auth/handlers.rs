@@ -8,10 +8,10 @@ use crate::{
     app::state::AppState,
     auth::dto::{
         AuthSessionResponse, AuthUserResponse, ConnectPolymarketRequest, CreateChallengeRequest,
-        CreateChallengeResponse, ForgotPasswordRequest, LoginRequest, ResetPasswordRequest,
-        SettingsUpdateResponse, SignupRequest, UpdateEmailRequest, UpdatePasswordRequest,
-        VenueConnectionResponse, VerifyChallengeRequest, VerifyChallengeResponse,
-        VerifyEmailRequest,
+        CreateChallengeResponse, ForgotPasswordRequest, LoginRequest, LogoutResponse,
+        ResetPasswordRequest, SettingsUpdateResponse, SignupRequest, UpdateEmailRequest,
+        UpdatePasswordRequest, VenueConnectionResponse, VerifyChallengeRequest,
+        VerifyChallengeResponse, VerifyEmailRequest,
     },
     error::{AppError, ErrorResponse},
     response::{ApiResponse, ok},
@@ -62,6 +62,46 @@ pub async fn login(
 
 #[utoipa::path(
     post,
+    path = "/api/v1/auth/logout",
+    tag = "Auth",
+    security(("bearer_auth" = [])),
+    responses(
+        (status = 200, description = "Current session revoked", body = ApiResponse<LogoutResponse>),
+        (status = 401, description = "Missing or invalid bearer token", body = ErrorResponse)
+    )
+)]
+pub async fn logout(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<ApiResponse<LogoutResponse>>, AppError> {
+    let access_token = bearer_token(&headers)?;
+    let response = state.auth_service.logout(&access_token).await?;
+
+    Ok(ok("Logged out successfully", response))
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/v1/auth/logout-all",
+    tag = "Auth",
+    security(("bearer_auth" = [])),
+    responses(
+        (status = 200, description = "All user sessions revoked", body = ApiResponse<LogoutResponse>),
+        (status = 401, description = "Missing or invalid bearer token", body = ErrorResponse)
+    )
+)]
+pub async fn logout_all(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<ApiResponse<LogoutResponse>>, AppError> {
+    let access_token = bearer_token(&headers)?;
+    let response = state.auth_service.logout_all(&access_token).await?;
+
+    Ok(ok("Logged out from all sessions successfully", response))
+}
+
+#[utoipa::path(
+    post,
     path = "/api/v1/auth/verify-email",
     tag = "Auth",
     request_body = VerifyEmailRequest,
@@ -107,7 +147,7 @@ pub async fn forgot_password(
     tag = "Auth",
     request_body = ResetPasswordRequest,
     responses(
-        (status = 200, description = "Password reset and session issued", body = ApiResponse<AuthSessionResponse>),
+        (status = 200, description = "Password reset, prior sessions revoked, and new session issued", body = ApiResponse<AuthSessionResponse>),
         (status = 400, description = "Invalid or expired reset token", body = ErrorResponse)
     )
 )]
@@ -223,7 +263,7 @@ pub async fn update_email(
     security(("bearer_auth" = [])),
     request_body = UpdatePasswordRequest,
     responses(
-        (status = 200, description = "Password updated", body = ApiResponse<SettingsUpdateResponse>),
+        (status = 200, description = "Password updated and all sessions revoked", body = ApiResponse<SettingsUpdateResponse>),
         (status = 400, description = "Invalid password change payload", body = ErrorResponse),
         (status = 401, description = "Current password is invalid", body = ErrorResponse)
     )

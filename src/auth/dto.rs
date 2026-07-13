@@ -63,6 +63,34 @@ pub struct SettingsUpdateResponse {
     pub message: String,
 }
 
+#[derive(Debug, Serialize, ToSchema)]
+pub struct LogoutResponse {
+    pub revoked_sessions: u64,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct WalletChallengeRequest {
+    #[schema(example = "0x1234567890abcdef1234567890abcdef12345678")]
+    pub wallet_address: String,
+    #[schema(example = 137)]
+    pub chain_id: u64,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct WalletChallengeResponse {
+    #[schema(example = "associate_wallet")]
+    pub purpose: String,
+    #[schema(example = 137)]
+    pub chain_id: u64,
+    #[schema(example = "0x1234567890abcdef1234567890abcdef12345678")]
+    pub wallet_address: String,
+    #[schema(example = "550e8400-e29b-41d4-a716-446655440000")]
+    pub nonce: String,
+    pub message: String,
+    #[schema(example = 1760000000)]
+    pub expires_at: u64,
+}
+
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct CreateChallengeRequest {
     #[schema(example = "0x1234567890abcdef1234567890abcdef12345678")]

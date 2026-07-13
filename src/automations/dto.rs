@@ -311,8 +311,9 @@ mod tests {
                         "action": "BUY",
                         "params": {
                             "outcome": "YES",
-                            "order_type": "MARKET",
-                            "amount": 10
+                            "order_type": "LIMIT",
+                            "usdc_amount": 10,
+                            "limit_price": 0.55
                         }
                     }
                 ],

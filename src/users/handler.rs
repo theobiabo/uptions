@@ -4,7 +4,10 @@ use utoipa::ToSchema;
 
 use crate::{
     app::state::AppState,
-    auth::handlers::bearer_token,
+    auth::{
+        dto::{WalletChallengeRequest, WalletChallengeResponse},
+        handlers::bearer_token,
+    },
     error::{AppError, ErrorResponse},
     response::{ApiResponse, created, ok},
     users::service::JoinWaitlistStruct,
@@ -42,6 +45,12 @@ pub struct UpdateWalletRequest {
     pub chain: SupportedChain,
     #[schema(example = 137)]
     pub chain_id: u64,
+    #[schema(example = "550e8400-e29b-41d4-a716-446655440000")]
+    pub nonce: String,
+    #[schema(
+        example = "0x5f2c9c0d93b1b3fddc55c4f98ccf5281af2c0612fd4f2cfd2c7d4dd4f3838f620dcf54e02db91f7df0ec6ee25b9e6f74fd839cc13a5d08d64f6b3db2de4d6c881b"
+    )]
+    pub signature: String,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -113,15 +122,43 @@ pub async fn update_trading_provider(
 }
 
 #[utoipa::path(
+    post,
+    path = "/api/v1/users/wallet/challenge",
+    tag = "Users",
+    security(("bearer_auth" = [])),
+    request_body = WalletChallengeRequest,
+    responses(
+        (status = 200, description = "Purpose-bound wallet association challenge created", body = ApiResponse<WalletChallengeResponse>),
+        (status = 400, description = "Invalid wallet or non-Polygon chain", body = ErrorResponse),
+        (status = 401, description = "Missing or invalid bearer token", body = ErrorResponse),
+        (status = 409, description = "Wallet belongs to another account", body = ErrorResponse)
+    )
+)]
+pub async fn create_wallet_challenge(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<WalletChallengeRequest>,
+) -> Result<Json<ApiResponse<WalletChallengeResponse>>, AppError> {
+    let access_token = bearer_token(&headers)?;
+    let challenge = state
+        .auth_service
+        .create_wallet_challenge(&access_token, &payload.wallet_address, payload.chain_id)
+        .await?;
+
+    Ok(ok("Wallet challenge created successfully", challenge))
+}
+
+#[utoipa::path(
     patch,
     path = "/api/v1/users/wallet",
     tag = "Users",
     security(("bearer_auth" = [])),
     request_body = UpdateWalletRequest,
     responses(
-        (status = 200, description = "Connected wallet saved", body = ApiResponse<UserWalletResponse>),
-        (status = 400, description = "Invalid wallet payload", body = ErrorResponse),
-        (status = 401, description = "Missing or invalid bearer token", body = ErrorResponse)
+        (status = 200, description = "Verified wallet associated", body = ApiResponse<UserWalletResponse>),
+        (status = 400, description = "Invalid, expired, or used challenge", body = ErrorResponse),
+        (status = 401, description = "Missing bearer token or invalid signature", body = ErrorResponse),
+        (status = 409, description = "Wallet belongs to another account", body = ErrorResponse)
     )
 )]
 pub async fn update_wallet(
@@ -138,10 +175,15 @@ pub async fn update_wallet(
     }
 
     let access_token = bearer_token(&headers)?;
-    let user_id = state.auth_service.current_user_id(&access_token).await?;
     let wallet_address = state
-        .user_service
-        .set_connected_wallet(&user_id, &payload.wallet_address)
+        .auth_service
+        .associate_wallet(
+            &access_token,
+            &payload.wallet_address,
+            payload.chain_id,
+            &payload.nonce,
+            &payload.signature,
+        )
         .await?;
 
     Ok(ok(
@@ -198,5 +240,22 @@ fn trading_provider_response(provider: SupportedVenue) -> TradingProviderRespons
         label: provider.label().to_owned(),
         provider,
         venue_id: provider.id().to_owned(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::UpdateWalletRequest;
+
+    #[test]
+    fn wallet_update_requires_nonce_and_signature() {
+        let payload = serde_json::json!({
+            "wallet_address": "0x1111111111111111111111111111111111111111",
+            "provider": "POLYMARKET",
+            "chain": "POLYGON",
+            "chain_id": 137
+        });
+
+        assert!(serde_json::from_value::<UpdateWalletRequest>(payload).is_err());
     }
 }

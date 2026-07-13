@@ -59,6 +59,8 @@ impl PolymarketExecutionType {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TradeIntentStatus {
     PendingSignature,
+    Submitting,
+    ReconciliationRequired,
     Submitted,
     Filled,
     PartiallyFilled,
@@ -71,6 +73,8 @@ impl TradeIntentStatus {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::PendingSignature => "pending_signature",
+            Self::Submitting => "submitting",
+            Self::ReconciliationRequired => "reconciliation_required",
             Self::Submitted => "submitted",
             Self::Filled => "filled",
             Self::PartiallyFilled => "partially_filled",
@@ -85,6 +89,8 @@ impl TradeIntentStatus {
 pub struct CreateTradeIntentRequest {
     pub amount: f64,
     pub automation_id: Option<String>,
+    #[serde(default)]
+    pub defer_exec: bool,
     #[schema(example = "540818")]
     pub market_id: String,
     #[schema(example = "World Cup: Golden Boot Winner")]
@@ -96,6 +102,8 @@ pub struct CreateTradeIntentRequest {
     pub side: TradeSide,
     pub order_type: TradeOrderType,
     pub execution_type: PolymarketExecutionType,
+    #[serde(default)]
+    pub post_only: bool,
     #[schema(example = "123456789")]
     pub token_id: String,
     #[schema(example = "0x1234567890abcdef1234567890abcdef12345678")]
@@ -119,6 +127,7 @@ pub struct TradeIntentResponse {
     pub chain: String,
     pub chain_id: i64,
     pub created_at: String,
+    pub defer_exec: bool,
     pub error: Option<String>,
     pub execution_type: String,
     pub id: String,
@@ -126,13 +135,17 @@ pub struct TradeIntentResponse {
     pub market_title: String,
     pub order_type: String,
     pub outcome: String,
+    pub post_only: bool,
     pub price: Option<f64>,
     pub provider: String,
     pub provider_order_id: Option<String>,
     #[schema(value_type = Object)]
     pub provider_response: Option<Value>,
+    pub reconciliation_checked_at: Option<String>,
     pub side: String,
+    pub signed_order_hash: Option<String>,
     pub status: String,
+    pub submission_started_at: Option<String>,
     pub submitted_at: Option<String>,
     pub token_id: String,
     pub updated_at: String,
@@ -149,5 +162,12 @@ pub struct CreateTradeIntentResponse {
 pub struct SubmitSignedTradeResponse {
     #[schema(value_type = Object)]
     pub provider_response: Value,
+    pub trade: TradeIntentResponse,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ReconcileTradeResponse {
+    pub provider_lookup_available: bool,
+    pub resolution: String,
     pub trade: TradeIntentResponse,
 }
