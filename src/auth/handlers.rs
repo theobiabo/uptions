@@ -9,7 +9,8 @@ use crate::{
     auth::dto::{
         AuthSessionResponse, AuthUserResponse, ConnectPolymarketRequest, CreateChallengeRequest,
         CreateChallengeResponse, ForgotPasswordRequest, LoginRequest, ResetPasswordRequest,
-        SignupRequest, VenueConnectionResponse, VerifyChallengeRequest, VerifyChallengeResponse,
+        SettingsUpdateResponse, SignupRequest, UpdateEmailRequest, UpdatePasswordRequest,
+        VenueConnectionResponse, VerifyChallengeRequest, VerifyChallengeResponse,
         VerifyEmailRequest,
     },
     error::{AppError, ErrorResponse},
@@ -24,7 +25,7 @@ use crate::{
     responses(
         (status = 200, description = "Account created and verification email sent", body = ApiResponse<AuthUserResponse>),
         (status = 400, description = "Invalid signup payload", body = ErrorResponse),
-        (status = 409, description = "Email already registered", body = ErrorResponse)
+        (status = 409, description = "Email or username already registered", body = ErrorResponse)
     )
 )]
 pub async fn signup(
@@ -183,6 +184,62 @@ pub async fn current_user(
     let user = state.auth_service.current_user(&access_token).await?;
 
     Ok(ok("Current user fetched successfully", user))
+}
+
+#[utoipa::path(
+    patch,
+    path = "/api/v1/users/settings/email",
+    tag = "Settings",
+    security(("bearer_auth" = [])),
+    request_body = UpdateEmailRequest,
+    responses(
+        (status = 200, description = "Email updated and verification sent", body = ApiResponse<AuthUserResponse>),
+        (status = 400, description = "Invalid email change payload", body = ErrorResponse),
+        (status = 401, description = "Current password is invalid", body = ErrorResponse),
+        (status = 409, description = "Email already registered", body = ErrorResponse)
+    )
+)]
+pub async fn update_email(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<UpdateEmailRequest>,
+) -> Result<Json<ApiResponse<AuthUserResponse>>, AppError> {
+    let access_token = bearer_token(&headers)?;
+    let user = state
+        .auth_service
+        .update_email(&access_token, payload)
+        .await?;
+
+    Ok(ok(
+        "Email updated. Check your inbox to verify the new address.",
+        user,
+    ))
+}
+
+#[utoipa::path(
+    patch,
+    path = "/api/v1/users/settings/password",
+    tag = "Settings",
+    security(("bearer_auth" = [])),
+    request_body = UpdatePasswordRequest,
+    responses(
+        (status = 200, description = "Password updated", body = ApiResponse<SettingsUpdateResponse>),
+        (status = 400, description = "Invalid password change payload", body = ErrorResponse),
+        (status = 401, description = "Current password is invalid", body = ErrorResponse)
+    )
+)]
+pub async fn update_password(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<UpdatePasswordRequest>,
+) -> Result<Json<ApiResponse<SettingsUpdateResponse>>, AppError> {
+    let access_token = bearer_token(&headers)?;
+    let response = state
+        .auth_service
+        .update_password(&access_token, payload)
+        .await?;
+
+    Ok(ok("Password updated successfully", response))
 }
 
 #[utoipa::path(

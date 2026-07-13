@@ -272,7 +272,7 @@ fn polymarket_order_payload(
             ));
         }
     };
-    let mut body = json!({
+    let body = json!({
         "deferExec": payload.defer_exec,
         "order": {
             "salt": order_salt(order)?,
@@ -290,12 +290,9 @@ fn polymarket_order_payload(
             "signature": required_order_field(order, "signature")?
         },
         "owner": credentials.api_key,
-        "orderType": payload.execution_type
+        "orderType": payload.execution_type,
+        "postOnly": payload.post_only.unwrap_or(false)
     });
-
-    if let Some(post_only) = payload.post_only {
-        body["postOnly"] = json!(post_only);
-    }
 
     Ok(body)
 }

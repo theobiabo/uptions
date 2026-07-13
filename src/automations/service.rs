@@ -223,7 +223,14 @@ impl AutomationService {
         &self,
         user_id: &str,
         payload: PublishAutomationRequest,
+        idempotency_key: Option<String>,
     ) -> Result<AutomationResponse, AppError> {
+        if let Some(model) = self
+            .find_by_idempotency_key(user_id, idempotency_key.as_deref())
+            .await?
+        {
+            return Ok(automation_response(model));
+        }
         validate_workflow(&payload.workflow)?;
         validate_provider(payload.provider)?;
         self.validate_user_readiness(user_id, payload.provider)
@@ -238,6 +245,7 @@ impl AutomationService {
         let model = automation::ActiveModel {
             id: Set(Uuid::new_v4().to_string()),
             user_id: Set(user_id.to_owned()),
+            idempotency_key: Set(idempotency_key.clone()),
             title: Set(title),
             market_id: Set(Some(market_id)),
             market_title: Set(Some(market_title)),
@@ -248,9 +256,19 @@ impl AutomationService {
             last_run_at: Set(None),
             created_at: Set(now.into()),
             updated_at: Set(now.into()),
-        }
-        .insert(&self.db)
-        .await?;
+        };
+        let model = match model.insert(&self.db).await {
+            Ok(model) => model,
+            Err(error) => {
+                if let Some(model) = self
+                    .find_by_idempotency_key(user_id, idempotency_key.as_deref())
+                    .await?
+                {
+                    return Ok(automation_response(model));
+                }
+                return Err(error.into());
+            }
+        };
         let response = automation_response(model);
         self.create_alert(
             user_id,
@@ -268,6 +286,21 @@ impl AutomationService {
         .await?;
 
         Ok(response)
+    }
+
+    async fn find_by_idempotency_key(
+        &self,
+        user_id: &str,
+        idempotency_key: Option<&str>,
+    ) -> Result<Option<automation::Model>, AppError> {
+        let Some(idempotency_key) = idempotency_key else {
+            return Ok(None);
+        };
+        Ok(automation::Entity::find()
+            .filter(automation::Column::UserId.eq(user_id))
+            .filter(automation::Column::IdempotencyKey.eq(idempotency_key))
+            .one(&self.db)
+            .await?)
     }
 
     pub async fn test_run(

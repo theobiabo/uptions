@@ -5,10 +5,15 @@ use utoipa::{
 use utoipa_swagger_ui::SwaggerUi;
 
 use crate::{
+    analytics::dto::{
+        AnalyticsCounts, AnalyticsOverviewResponse, DailyActivity, PerformanceAvailability,
+        PnlAvailability, StatusCount, WorkflowActivity,
+    },
     auth::dto::{
         AuthSessionResponse, AuthUserResponse, ConnectPolymarketRequest, CreateChallengeRequest,
         CreateChallengeResponse, ForgotPasswordRequest, LoginRequest, ResetPasswordRequest,
-        SignupRequest, VenueConnectionResponse, VerifyChallengeRequest, VerifyChallengeResponse,
+        SettingsUpdateResponse, SignupRequest, UpdateEmailRequest, UpdatePasswordRequest,
+        VenueConnectionResponse, VerifyChallengeRequest, VerifyChallengeResponse,
         VerifyEmailRequest,
     },
     automations::dto::{
@@ -44,6 +49,7 @@ use crate::{
 #[openapi(
     paths(
         super::health_check,
+        crate::analytics::handlers::analytics_overview,
         crate::auth::handlers::signup,
         crate::auth::handlers::login,
         crate::auth::handlers::verify_email,
@@ -52,6 +58,8 @@ use crate::{
         crate::auth::handlers::create_challenge,
         crate::auth::handlers::verify_challenge,
         crate::auth::handlers::current_user,
+        crate::auth::handlers::update_email,
+        crate::auth::handlers::update_password,
         crate::auth::handlers::connect_polymarket,
         crate::automations::handlers::list_automations,
         crate::automations::handlers::publish_automation,
@@ -84,6 +92,14 @@ use crate::{
     ),
     components(
         schemas(
+            AnalyticsCounts,
+            AnalyticsOverviewResponse,
+            DailyActivity,
+            PerformanceAvailability,
+            PnlAvailability,
+            StatusCount,
+            WorkflowActivity,
+            ApiResponse<AnalyticsOverviewResponse>,
             AuthUserResponse,
             AuthSessionResponse,
             AutomationAlertResponse,
@@ -114,6 +130,7 @@ use crate::{
             ApiResponse<Vec<TradingProviderResponse>>,
             ApiResponse<UserTradingProviderResponse>,
             ApiResponse<UserWalletResponse>,
+            ApiResponse<SettingsUpdateResponse>,
             ApiResponse<Vec<TradeIntentResponse>>,
             ApiResponse<TradeIntentResponse>,
             ApiResponse<CreateTradeIntentResponse>,
@@ -145,7 +162,10 @@ use crate::{
             TradeSide,
             PublishAutomationRequest,
             ResetPasswordRequest,
+            SettingsUpdateResponse,
             SignupRequest,
+            UpdateEmailRequest,
+            UpdatePasswordRequest,
             TestRunAutomationRequest,
             TestRunAutomationResponse,
             TradingProviderResponse,

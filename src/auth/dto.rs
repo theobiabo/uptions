@@ -10,6 +10,8 @@ pub struct SignupRequest {
     pub email: String,
     #[schema(example = "correct horse battery staple")]
     pub password: String,
+    #[schema(example = "uptions_user")]
+    pub username: String,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -38,6 +40,27 @@ pub struct ResetPasswordRequest {
     pub token: String,
     #[schema(example = "correct horse battery staple")]
     pub password: String,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct UpdateEmailRequest {
+    #[schema(example = "user@uptions.com")]
+    pub email: String,
+    #[schema(example = "correct horse battery staple")]
+    pub current_password: Option<String>,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct UpdatePasswordRequest {
+    #[schema(example = "correct horse battery staple")]
+    pub current_password: String,
+    #[schema(example = "new correct horse battery staple")]
+    pub new_password: String,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct SettingsUpdateResponse {
+    pub message: String,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -80,8 +103,12 @@ pub struct AuthUserResponse {
     pub wallet_address: Option<String>,
     #[schema(example = "user@uptions.com")]
     pub email: Option<String>,
+    #[schema(example = "uptions_user")]
+    pub username: Option<String>,
     #[schema(example = true)]
     pub email_verified: bool,
+    #[schema(example = true)]
+    pub password_configured: bool,
     pub preferred_trading_provider: Option<SupportedVenue>,
     pub venue_connections: Vec<VenueConnectionResponse>,
 }

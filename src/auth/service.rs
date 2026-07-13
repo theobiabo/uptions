@@ -18,8 +18,9 @@ use uuid::Uuid;
 use crate::{
     auth::dto::{
         AuthSessionResponse, AuthUserResponse, ConnectPolymarketRequest, CreateChallengeResponse,
-        ForgotPasswordRequest, LoginRequest, ResetPasswordRequest, SignupRequest,
-        VenueConnectionResponse, VerifyChallengeResponse,
+        ForgotPasswordRequest, LoginRequest, ResetPasswordRequest, SettingsUpdateResponse,
+        SignupRequest, UpdateEmailRequest, UpdatePasswordRequest, VenueConnectionResponse,
+        VerifyChallengeResponse,
     },
     automations::dto::AutomationProvider,
     db::Db,
@@ -32,7 +33,7 @@ use crate::{
     venue::SupportedVenue,
 };
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, EntityTrait, IntoActiveModel, QueryFilter, Set,
+    ActiveModelTrait, ColumnTrait, EntityTrait, IntoActiveModel, QueryFilter, Set, SqlErr,
     sea_query::OnConflict,
 };
 use serde_json::{Value, json};
@@ -42,6 +43,19 @@ const SESSION_TTL_SECONDS: u64 = 60 * 60 * 24 * 30;
 const EMAIL_VERIFICATION_TTL_SECONDS: u64 = 60 * 60 * 24;
 const PASSWORD_RESET_TTL_SECONDS: u64 = 60 * 60;
 const MIN_PASSWORD_LENGTH: usize = 8;
+const MIN_USERNAME_LENGTH: usize = 3;
+const MAX_USERNAME_LENGTH: usize = 20;
+const RESERVED_USERNAMES: [&str; 9] = [
+    "admin",
+    "administrator",
+    "api",
+    "support",
+    "uptions",
+    "root",
+    "system",
+    "settings",
+    "profile",
+];
 
 #[derive(Clone)]
 pub struct AuthService {
@@ -104,15 +118,27 @@ impl AuthService {
 
     pub async fn signup(&self, payload: SignupRequest) -> Result<AuthUserResponse, AppError> {
         let email = normalize_email(&payload.email)?;
+        let username = normalize_username(&payload.username)?;
         validate_password(&payload.password)?;
 
-        let existing = user::Entity::find()
+        let existing_email = user::Entity::find()
             .filter(user::Column::Email.eq(Some(email.clone())))
             .one(&self.db)
             .await?;
 
-        if existing.is_some() {
+        if existing_email.is_some() {
             return Err(AppError::Conflict("email is already registered".to_owned()));
+        }
+
+        let existing_username = user::Entity::find()
+            .filter(user::Column::Username.eq(Some(username.clone())))
+            .one(&self.db)
+            .await?;
+
+        if existing_username.is_some() {
+            return Err(AppError::Conflict(
+                "username is already registered".to_owned(),
+            ));
         }
 
         let password_hash = hash_password(&payload.password)?;
@@ -123,13 +149,20 @@ impl AuthService {
         let user = user::ActiveModel {
             id: Set(user_id.clone()),
             email: Set(Some(email.clone())),
+            username: Set(Some(username)),
             password_hash: Set(Some(password_hash)),
             email_verification_token_hash: Set(Some(hash_access_token(&verification_token))),
             email_verification_expires_at: Set(Some(verification_expires_at.into())),
             ..Default::default()
         }
         .insert(&self.db)
-        .await?;
+        .await
+        .map_err(|error| match error.sql_err() {
+            Some(SqlErr::UniqueConstraintViolation(_)) => {
+                AppError::Conflict("email or username is already registered".to_owned())
+            }
+            _ => AppError::DatabaseError(error.to_string()),
+        })?;
 
         self.ensure_email_auth_method(&user_id, &email).await?;
         self.send_verification_email(&email, &verification_token)
@@ -294,6 +327,89 @@ impl AuthService {
         Ok(self.auth_user_response(&user).await?)
     }
 
+    pub async fn update_email(
+        &self,
+        access_token: &str,
+        payload: UpdateEmailRequest,
+    ) -> Result<AuthUserResponse, AppError> {
+        let session = self.session(access_token).await?;
+        let email = normalize_email(&payload.email)?;
+        let model = user::Entity::find_by_id(&session.user_id)
+            .one(&self.db)
+            .await?
+            .ok_or(AppError::Unauthorized)?;
+
+        if let Some(password_hash) = model.password_hash.as_deref() {
+            let current_password = payload
+                .current_password
+                .as_deref()
+                .ok_or_else(|| AppError::BadRequest("current password is required".to_owned()))?;
+
+            if !verify_password(current_password, password_hash)? {
+                return Err(AppError::Unauthorized);
+            }
+        }
+
+        if model.email.as_deref() == Some(email.as_str()) {
+            return self.auth_user_response(&model).await;
+        }
+
+        let existing = user::Entity::find()
+            .filter(user::Column::Email.eq(Some(email.clone())))
+            .one(&self.db)
+            .await?;
+
+        if existing.is_some_and(|existing| existing.id != model.id) {
+            return Err(AppError::Conflict("email is already registered".to_owned()));
+        }
+
+        let verification_token = generate_auth_token();
+        let verification_expires_at =
+            timestamp_after(Duration::from_secs(EMAIL_VERIFICATION_TTL_SECONDS));
+        let user_id = model.id.clone();
+        let mut active = model.into_active_model();
+        active.email = Set(Some(email.clone()));
+        active.email_verified_at = Set(None);
+        active.email_verification_token_hash = Set(Some(hash_access_token(&verification_token)));
+        active.email_verification_expires_at = Set(Some(verification_expires_at.into()));
+        active.updated_at = Set(Utc::now().into());
+        let model = active.update(&self.db).await?;
+        self.sync_email_auth_method(&user_id, &email).await?;
+        self.send_verification_email(&email, &verification_token)
+            .await;
+
+        self.auth_user_response(&model).await
+    }
+
+    pub async fn update_password(
+        &self,
+        access_token: &str,
+        payload: UpdatePasswordRequest,
+    ) -> Result<SettingsUpdateResponse, AppError> {
+        let session = self.session(access_token).await?;
+        let model = user::Entity::find_by_id(&session.user_id)
+            .one(&self.db)
+            .await?
+            .ok_or(AppError::Unauthorized)?;
+        let password_hash = model.password_hash.as_deref().ok_or_else(|| {
+            AppError::BadRequest("password is not configured for this account".to_owned())
+        })?;
+
+        if !verify_password(&payload.current_password, password_hash)? {
+            return Err(AppError::Unauthorized);
+        }
+
+        validate_password(&payload.new_password)?;
+        let mut active = model.into_active_model();
+        active.password_hash = Set(Some(hash_password(&payload.new_password)?));
+        active.updated_at = Set(Utc::now().into());
+        active.update(&self.db).await?;
+
+        Ok(SettingsUpdateResponse {
+            message: "Password updated successfully".to_owned(),
+        })
+    }
+
     pub async fn connect_polymarket(
         &self,
         access_token: &str,
@@ -449,6 +565,23 @@ impl AuthService {
         Ok(())
     }
 
+    async fn sync_email_auth_method(&self, user_id: &str, email: &str) -> Result<(), AppError> {
+        if let Some(model) = auth_method::Entity::find()
+            .filter(auth_method::Column::UserId.eq(user_id))
+            .filter(auth_method::Column::MethodType.eq("email"))
+            .one(&self.db)
+            .await?
+        {
+            let mut active = model.into_active_model();
+            active.external_id = Set(email.to_owned());
+            active.updated_at = Set(Utc::now().into());
+            active.update(&self.db).await?;
+            return Ok(());
+        }
+
+        self.ensure_email_auth_method(user_id, email).await
+    }
+
     async fn ensure_email_auth_method(&self, user_id: &str, email: &str) -> Result<(), AppError> {
         auth_method::Entity::insert(auth_method::ActiveModel {
             id: Set(Uuid::new_v4().to_string()),
@@ -539,7 +672,9 @@ impl AuthService {
             primary_wallet_address: user.primary_wallet_address.clone(),
             wallet_address: user.primary_wallet_address.clone(),
             email: user.email.clone(),
+            username: user.username.clone(),
             email_verified: user.email.is_none() || user.email_verified_at.is_some(),
+            password_configured: user.password_hash.is_some(),
             preferred_trading_provider: user
                 .preferred_trading_provider
                 .as_deref()
@@ -591,6 +726,51 @@ pub fn normalize_email(email: &str) -> Result<String, AppError> {
     }
 
     Ok(email)
+}
+
+pub fn normalize_username(username: &str) -> Result<String, AppError> {
+    let username = username.trim().to_ascii_lowercase();
+
+    if !(MIN_USERNAME_LENGTH..=MAX_USERNAME_LENGTH).contains(&username.len())
+        || !username.is_ascii()
+    {
+        return Err(AppError::BadRequest(format!(
+            "username must be {MIN_USERNAME_LENGTH}-{MAX_USERNAME_LENGTH} ASCII characters"
+        )));
+    }
+
+    if !username.as_bytes()[0].is_ascii_lowercase() {
+        return Err(AppError::BadRequest(
+            "username must start with a letter".to_owned(),
+        ));
+    }
+
+    if !username
+        .bytes()
+        .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+    {
+        return Err(AppError::BadRequest(
+            "username may only contain lowercase letters, digits, and underscores".to_owned(),
+        ));
+    }
+
+    if username.ends_with('_') {
+        return Err(AppError::BadRequest(
+            "username must not end with an underscore".to_owned(),
+        ));
+    }
+
+    if username.contains("__") {
+        return Err(AppError::BadRequest(
+            "username must not contain consecutive underscores".to_owned(),
+        ));
+    }
+
+    if RESERVED_USERNAMES.contains(&username.as_str()) {
+        return Err(AppError::BadRequest("username is reserved".to_owned()));
+    }
+
+    Ok(username)
 }
 
 pub fn validate_password(password: &str) -> Result<(), AppError> {
@@ -862,4 +1042,52 @@ fn encode_hex(bytes: &[u8]) -> String {
     }
 
     output
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{RESERVED_USERNAMES, normalize_username};
+
+    #[test]
+    fn username_is_trimmed_and_lowercased() {
+        assert_eq!(normalize_username("  Alice_123  ").unwrap(), "alice_123");
+    }
+
+    #[test]
+    fn username_accepts_valid_boundaries_and_characters() {
+        assert_eq!(normalize_username("abc").unwrap(), "abc");
+        assert_eq!(normalize_username("a1_b2").unwrap(), "a1_b2");
+        assert_eq!(
+            normalize_username("abcdefghijklmnopqrst").unwrap(),
+            "abcdefghijklmnopqrst"
+        );
+    }
+
+    #[test]
+    fn username_rejects_invalid_lengths_and_non_ascii() {
+        assert!(normalize_username("ab").is_err());
+        assert!(normalize_username("abcdefghijklmnopqrstu").is_err());
+        assert!(normalize_username("josé").is_err());
+    }
+
+    #[test]
+    fn username_rejects_invalid_start_and_characters() {
+        assert!(normalize_username("1alice").is_err());
+        assert!(normalize_username("_alice").is_err());
+        assert!(normalize_username("alice-smith").is_err());
+        assert!(normalize_username("alice smith").is_err());
+    }
+
+    #[test]
+    fn username_rejects_invalid_underscore_placement() {
+        assert!(normalize_username("alice_").is_err());
+        assert!(normalize_username("alice__smith").is_err());
+    }
+
+    #[test]
+    fn username_rejects_reserved_names_after_normalization() {
+        for username in RESERVED_USERNAMES {
+            assert!(normalize_username(&format!(" {username} ")).is_err());
+        }
+    }
 }

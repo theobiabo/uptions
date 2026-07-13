@@ -1,4 +1,5 @@
 use crate::{
+    analytics::service::AnalyticsService,
     auth::service::AuthService,
     automations::{executor::AutomationExecutor, service::AutomationService},
     config::AppConfig,
@@ -14,6 +15,7 @@ use sea_orm_migration::MigratorTrait;
 
 #[derive(Clone)]
 pub struct AppState {
+    pub analytics_service: AnalyticsService,
     pub auth_service: AuthService,
     pub automation_service: AutomationService,
     pub db: Db,
@@ -45,6 +47,7 @@ impl AppState {
         );
 
         Ok(Self {
+            analytics_service: AnalyticsService::new(db.clone()),
             auth_service: AuthService::new(
                 db.clone(),
                 config.credential_encryption_key.clone(),
