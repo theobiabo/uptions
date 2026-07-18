@@ -1,11 +1,10 @@
 use std::env;
 
-use reqwest::Url;
+use crate::providers::polymarket::config::{
+    CLOB_HOST, GAMMA_HOST, USER_WS_HOST, validate_api_host, validate_user_ws_url,
+};
 
 const DEFAULT_PRODUCTION_ORIGIN: &str = "https://www.uptions.xyz";
-const POLYMARKET_CLOB_HOST: &str = "clob.polymarket.com";
-const POLYMARKET_GAMMA_HOST: &str = "gamma-api.polymarket.com";
-const POLYMARKET_USER_WS_HOST: &str = "ws-subscriptions-clob.polymarket.com";
 
 #[derive(Clone, Debug)]
 pub struct AppConfig {
@@ -30,25 +29,17 @@ impl AppConfig {
     pub fn from_env() -> Self {
         let environment = env::var("APP_ENV").unwrap_or_else(|_| "development".to_owned());
         let production = is_production_environment(&environment);
-        let polymarket_clob_host = env::var("POLYMARKET_CLOB_HOST")
-            .unwrap_or_else(|_| format!("https://{POLYMARKET_CLOB_HOST}"));
-        let polymarket_gamma_host = env::var("POLYMARKET_GAMMA_HOST")
-            .unwrap_or_else(|_| format!("https://{POLYMARKET_GAMMA_HOST}"));
+        let polymarket_clob_host =
+            env::var("POLYMARKET_CLOB_HOST").unwrap_or_else(|_| format!("https://{CLOB_HOST}"));
+        let polymarket_gamma_host =
+            env::var("POLYMARKET_GAMMA_HOST").unwrap_or_else(|_| format!("https://{GAMMA_HOST}"));
         let polymarket_user_ws_url = env::var("POLYMARKET_USER_WS_URL")
-            .unwrap_or_else(|_| format!("wss://{POLYMARKET_USER_WS_HOST}/ws/user"));
+            .unwrap_or_else(|_| format!("wss://{USER_WS_HOST}/ws/user"));
 
         if production {
-            validate_polymarket_host(
-                "POLYMARKET_CLOB_HOST",
-                &polymarket_clob_host,
-                POLYMARKET_CLOB_HOST,
-            );
-            validate_polymarket_host(
-                "POLYMARKET_GAMMA_HOST",
-                &polymarket_gamma_host,
-                POLYMARKET_GAMMA_HOST,
-            );
-            validate_polymarket_user_ws_url(&polymarket_user_ws_url);
+            validate_api_host("POLYMARKET_CLOB_HOST", &polymarket_clob_host, CLOB_HOST);
+            validate_api_host("POLYMARKET_GAMMA_HOST", &polymarket_gamma_host, GAMMA_HOST);
+            validate_user_ws_url(&polymarket_user_ws_url);
         }
 
         let cors_allowed_origins = env::var("CORS_ALLOWED_ORIGINS")
@@ -112,71 +103,5 @@ where
             parsed
         }
         Err(_) => default,
-    }
-}
-
-fn validate_polymarket_user_ws_url(value: &str) {
-    let url = Url::parse(value)
-        .unwrap_or_else(|_| panic!("POLYMARKET_USER_WS_URL must be a valid WSS URL"));
-    let valid = url.scheme() == "wss"
-        && url.host_str() == Some(POLYMARKET_USER_WS_HOST)
-        && url.port_or_known_default() == Some(443)
-        && url.username().is_empty()
-        && url.password().is_none()
-        && url.path() == "/ws/user"
-        && url.query().is_none()
-        && url.fragment().is_none();
-
-    assert!(
-        valid,
-        "POLYMARKET_USER_WS_URL must use wss://{POLYMARKET_USER_WS_HOST}/ws/user"
-    );
-}
-
-fn validate_polymarket_host(name: &str, value: &str, allowed_host: &str) {
-    let url = Url::parse(value).unwrap_or_else(|_| panic!("{name} must be a valid HTTPS URL"));
-    let valid = url.scheme() == "https"
-        && url.host_str() == Some(allowed_host)
-        && url.port_or_known_default() == Some(443)
-        && url.username().is_empty()
-        && url.password().is_none()
-        && matches!(url.path(), "" | "/")
-        && url.query().is_none()
-        && url.fragment().is_none();
-
-    assert!(valid, "{name} must use https://{allowed_host}");
-}
-
-#[cfg(test)]
-mod tests {
-    use super::validate_polymarket_host;
-
-    #[test]
-    fn accepts_allowlisted_polymarket_host() {
-        validate_polymarket_host(
-            "POLYMARKET_CLOB_HOST",
-            "https://clob.polymarket.com",
-            "clob.polymarket.com",
-        );
-    }
-
-    #[test]
-    #[should_panic(expected = "must use https://clob.polymarket.com")]
-    fn rejects_insecure_polymarket_host() {
-        validate_polymarket_host(
-            "POLYMARKET_CLOB_HOST",
-            "http://clob.polymarket.com",
-            "clob.polymarket.com",
-        );
-    }
-
-    #[test]
-    #[should_panic(expected = "must use https://clob.polymarket.com")]
-    fn rejects_unlisted_polymarket_host() {
-        validate_polymarket_host(
-            "POLYMARKET_CLOB_HOST",
-            "https://example.com",
-            "clob.polymarket.com",
-        );
     }
 }

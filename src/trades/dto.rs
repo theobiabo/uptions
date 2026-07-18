@@ -2,7 +2,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use utoipa::ToSchema;
 
-use crate::{polymarket::dto::PolymarketTokenMetadataResponse, venue::SupportedVenue};
+use crate::providers::{
+    polymarket::dto::{PolymarketExecutionType, PolymarketTokenMetadataResponse},
+    types::ProviderId,
+};
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -32,26 +35,6 @@ impl TradeOrderType {
         match self {
             Self::Market => "MARKET",
             Self::Limit => "LIMIT",
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
-#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
-pub enum PolymarketExecutionType {
-    Fok,
-    Fak,
-    Gtc,
-    Gtd,
-}
-
-impl PolymarketExecutionType {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Fok => "FOK",
-            Self::Fak => "FAK",
-            Self::Gtc => "GTC",
-            Self::Gtd => "GTD",
         }
     }
 }
@@ -106,7 +89,7 @@ pub struct CreateTradeIntentRequest {
     #[schema(example = "YES")]
     pub outcome: String,
     pub price: Option<f64>,
-    pub provider: SupportedVenue,
+    pub provider: ProviderId,
     pub side: TradeSide,
     pub order_type: TradeOrderType,
     pub execution_type: PolymarketExecutionType,
@@ -195,6 +178,7 @@ pub struct CancelMultipleTradesRequest {
 
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct CancelMarketTradesRequest {
+    pub provider: ProviderId,
     pub market_id: String,
     pub token_id: String,
 }

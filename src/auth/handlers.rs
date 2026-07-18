@@ -1,19 +1,24 @@
 use axum::{
     Json,
-    extract::State,
+    extract::{Path, State},
     http::{HeaderMap, header},
 };
 
 use crate::{
     app::state::AppState,
     auth::dto::{
-        AuthSessionResponse, AuthUserResponse, ConnectPolymarketRequest, CreateChallengeRequest,
-        CreateChallengeResponse, ForgotPasswordRequest, LoginRequest, LogoutResponse,
-        ResetPasswordRequest, SettingsUpdateResponse, SignupRequest, UpdateEmailRequest,
-        UpdatePasswordRequest, UpdateUsernameRequest, VenueConnectionResponse,
-        VerifyChallengeRequest, VerifyChallengeResponse, VerifyEmailRequest,
+        AuthSessionResponse, AuthUserResponse, CreateChallengeRequest, CreateChallengeResponse,
+        ForgotPasswordRequest, LoginRequest, LogoutResponse, ResetPasswordRequest,
+        SettingsUpdateResponse, SignupRequest, UpdateEmailRequest, UpdatePasswordRequest,
+        UpdateUsernameRequest, VenueConnectionResponse, VerifyChallengeRequest,
+        VerifyChallengeResponse, VerifyEmailRequest,
     },
     error::{AppError, ErrorResponse},
+    providers::{
+        handlers::parse_provider,
+        polymarket::credentials::ConnectPolymarketRequest,
+        types::{ProviderCapability, ProviderId},
+    },
     response::{ApiResponse, ok},
 };
 
@@ -311,28 +316,37 @@ pub async fn update_username(
 
 #[utoipa::path(
     post,
-    path = "/api/v1/venue-connections/polymarket",
-    tag = "Venue Connections",
+    path = "/api/v1/providers/{provider}/connection",
+    tag = "Provider Connections",
     security(("bearer_auth" = [])),
+    params(("provider" = String, Path, description = "Provider route id")),
     request_body = ConnectPolymarketRequest,
     responses(
-        (status = 200, description = "Polymarket connection saved", body = ApiResponse<VenueConnectionResponse>),
-        (status = 400, description = "Invalid Polymarket connection payload", body = ErrorResponse),
+        (status = 200, description = "Provider connection saved", body = ApiResponse<VenueConnectionResponse>),
+        (status = 400, description = "Invalid provider or connection payload", body = ErrorResponse),
         (status = 401, description = "Missing or invalid bearer token", body = ErrorResponse)
     )
 )]
-pub async fn connect_polymarket(
+pub async fn connect_provider(
     State(state): State<AppState>,
     headers: HeaderMap,
+    Path(provider): Path<String>,
     Json(payload): Json<ConnectPolymarketRequest>,
 ) -> Result<Json<ApiResponse<VenueConnectionResponse>>, AppError> {
+    let provider = parse_provider(&provider)?;
+    state
+        .providers
+        .require_capability(provider, ProviderCapability::VenueConnection)?;
     let access_token = bearer_token(&headers)?;
-    let connection = state
-        .auth_service
-        .connect_polymarket(&access_token, payload)
-        .await?;
-
-    Ok(ok("Polymarket connection saved successfully", connection))
+    let connection = match provider {
+        ProviderId::Polymarket => {
+            state
+                .auth_service
+                .connect_polymarket(&access_token, payload)
+                .await?
+        }
+    };
+    Ok(ok("Provider connection saved successfully", connection))
 }
 
 pub fn bearer_token(headers: &HeaderMap) -> Result<String, AppError> {

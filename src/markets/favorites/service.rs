@@ -15,6 +15,7 @@ use crate::{
             MarketFavoriteStatusResponse, MarketFavoritesPageResponse, MarketFavoritesQuery,
         },
     },
+    providers::types::ProviderId,
 };
 
 const DEFAULT_PAGE_SIZE: u64 = 50;
@@ -32,6 +33,7 @@ impl MarketFavoriteService {
 
     pub async fn favorite(
         &self,
+        provider: ProviderId,
         user_id: &str,
         market_id: &str,
     ) -> Result<MarketFavoriteStatusResponse, AppError> {
@@ -40,12 +42,14 @@ impl MarketFavoriteService {
         market_favorite::Entity::insert(market_favorite::ActiveModel {
             id: Set(Uuid::new_v4().to_string()),
             user_id: Set(user_id.to_owned()),
+            provider: Set(provider.storage_value().to_owned()),
             market_id: Set(market_id.clone()),
             created_at: Set(Utc::now().into()),
         })
         .on_conflict(
             OnConflict::columns([
                 market_favorite::Column::UserId,
+                market_favorite::Column::Provider,
                 market_favorite::Column::MarketId,
             ])
             .do_nothing()
@@ -55,6 +59,7 @@ impl MarketFavoriteService {
         .await?;
 
         Ok(MarketFavoriteStatusResponse {
+            provider,
             market_id,
             favorited: true,
         })
@@ -62,6 +67,7 @@ impl MarketFavoriteService {
 
     pub async fn unfavorite(
         &self,
+        provider: ProviderId,
         user_id: &str,
         market_id: &str,
     ) -> Result<MarketFavoriteStatusResponse, AppError> {
@@ -69,11 +75,13 @@ impl MarketFavoriteService {
 
         market_favorite::Entity::delete_many()
             .filter(market_favorite::Column::UserId.eq(user_id))
+            .filter(market_favorite::Column::Provider.eq(provider.storage_value()))
             .filter(market_favorite::Column::MarketId.eq(&market_id))
             .exec(&self.db)
             .await?;
 
         Ok(MarketFavoriteStatusResponse {
+            provider,
             market_id,
             favorited: false,
         })
@@ -81,18 +89,21 @@ impl MarketFavoriteService {
 
     pub async fn status(
         &self,
+        provider: ProviderId,
         user_id: &str,
         market_id: &str,
     ) -> Result<MarketFavoriteStatusResponse, AppError> {
         let market_id = clean_market_id(market_id)?;
         let favorited = market_favorite::Entity::find()
             .filter(market_favorite::Column::UserId.eq(user_id))
+            .filter(market_favorite::Column::Provider.eq(provider.storage_value()))
             .filter(market_favorite::Column::MarketId.eq(&market_id))
             .one(&self.db)
             .await?
             .is_some();
 
         Ok(MarketFavoriteStatusResponse {
+            provider,
             market_id,
             favorited,
         })
@@ -100,16 +111,19 @@ impl MarketFavoriteService {
 
     pub async fn list(
         &self,
+        provider: ProviderId,
         user_id: &str,
         query: MarketFavoritesQuery,
     ) -> Result<MarketFavoritesPageResponse, AppError> {
         let limit = page_size(query.limit)?;
-        let mut favorites_query =
-            market_favorite::Entity::find().filter(market_favorite::Column::UserId.eq(user_id));
+        let mut favorites_query = market_favorite::Entity::find()
+            .filter(market_favorite::Column::UserId.eq(user_id))
+            .filter(market_favorite::Column::Provider.eq(provider.storage_value()));
 
         if let Some(before) = clean_cursor(query.before.as_deref())? {
             let cursor = market_favorite::Entity::find_by_id(&before)
                 .filter(market_favorite::Column::UserId.eq(user_id))
+                .filter(market_favorite::Column::Provider.eq(provider.storage_value()))
                 .one(&self.db)
                 .await?
                 .ok_or_else(|| AppError::BadRequest("invalid favorites cursor".to_owned()))?;
@@ -141,6 +155,7 @@ impl MarketFavoriteService {
             .collect();
 
         Ok(MarketFavoritesPageResponse {
+            provider,
             market_ids,
             next_cursor,
         })

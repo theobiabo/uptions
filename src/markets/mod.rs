@@ -1,5 +1,6 @@
 pub mod comments;
 pub mod favorites;
+pub mod types;
 
 use crate::error::AppError;
 

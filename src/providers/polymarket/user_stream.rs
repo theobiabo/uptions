@@ -18,11 +18,15 @@ use crate::{
         credentials::{decrypt_json, parse_encryption_key},
         wallet::{normalize_wallet_address, same_wallet},
     },
-    polymarket::{
-        connection::{
-            ACTIVE_STATUS, EligibilityFailure, POLYMARKET_VENUE, mark_eligibility_failure,
+    providers::{
+        polymarket::{
+            connection::{
+                ACTIVE_STATUS, EligibilityFailure, POLYMARKET_PROVIDER, mark_eligibility_failure,
+            },
+            credentials::PolymarketApiCredentials,
+            dto::PolymarketUserEvent,
         },
-        dto::{PolymarketApiCredentials, PolymarketUserEvent},
+        types::ProviderId,
     },
     trades::dto::TradeIntentStatus,
 };
@@ -58,7 +62,7 @@ impl PolymarketUserStreamSupervisor {
         let mut workers: HashMap<String, WorkerHandle> = HashMap::new();
         loop {
             match venue_connection::Entity::find()
-                .filter(venue_connection::Column::Venue.eq(POLYMARKET_VENUE))
+                .filter(venue_connection::Column::Provider.eq(POLYMARKET_PROVIDER))
                 .filter(venue_connection::Column::Enabled.eq(true))
                 .filter(venue_connection::Column::Status.eq(ACTIVE_STATUS))
                 .all(&self.db)
@@ -342,6 +346,7 @@ async fn process_event(
     } else {
         trade_intent::Entity::find()
             .filter(trade_intent::Column::UserId.eq(user_id))
+            .filter(trade_intent::Column::Provider.eq(ProviderId::Polymarket.storage_value()))
             .filter(trade_intent::Column::ProviderOrderId.is_in(order_ids.clone()))
             .all(db)
             .await?
@@ -361,6 +366,7 @@ async fn process_event(
     polymarket_user_event::Entity::insert(polymarket_user_event::ActiveModel {
         id: Set(Uuid::new_v4().to_string()),
         user_id: Set(user_id.to_owned()),
+        provider: Set(ProviderId::Polymarket.storage_value().to_owned()),
         venue_connection_id: Set(connection_id.to_owned()),
         trade_intent_id: Set(trades.first().map(|trade| trade.id.clone())),
         event_kind: Set(event_kind.clone()),
@@ -376,9 +382,12 @@ async fn process_event(
         ..Default::default()
     })
     .on_conflict(
-        OnConflict::column(polymarket_user_event::Column::EventIdentity)
-            .do_nothing()
-            .to_owned(),
+        OnConflict::columns([
+            polymarket_user_event::Column::Provider,
+            polymarket_user_event::Column::EventIdentity,
+        ])
+        .do_nothing()
+        .to_owned(),
     )
     .exec(db)
     .await?;
@@ -566,7 +575,10 @@ mod tests {
     use crate::{
         entities::venue_connection,
         libs::credentials::encrypt_json,
-        polymarket::{connection::EligibilityFailure, dto::PolymarketUserEvent},
+        providers::{
+            polymarket::{connection::EligibilityFailure, dto::PolymarketUserEvent},
+            types::ProviderId,
+        },
         trades::dto::TradeIntentStatus,
     };
 
@@ -580,7 +592,8 @@ mod tests {
         venue_connection::Model {
             id: "connection-1".to_owned(),
             user_id: "user-1".to_owned(),
-            venue: "polymarket".to_owned(),
+            provider: ProviderId::Polymarket.storage_value().to_owned(),
+            venue: ProviderId::Polymarket.route_value().to_owned(),
             account_identifier: WALLET.to_owned(),
             auth_type: "api_key".to_owned(),
             config,

@@ -24,6 +24,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260713_000006_polymarket_private_beta_lifecycle::Migration),
             Box::new(m20260718_000001_market_comments::Migration),
             Box::new(m20260718_000002_market_favorites::Migration),
+            Box::new(m20260718_000003_provider_architecture::Migration),
         ]
     }
 }
@@ -45,3 +46,4 @@ mod m20260713_000005_trade_submission_hardening;
 mod m20260713_000006_polymarket_private_beta_lifecycle;
 mod m20260718_000001_market_comments;
 mod m20260718_000002_market_favorites;
+mod m20260718_000003_provider_architecture;

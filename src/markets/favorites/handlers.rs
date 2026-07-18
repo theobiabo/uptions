@@ -11,113 +11,112 @@ use crate::{
     markets::favorites::dto::{
         MarketFavoriteStatusResponse, MarketFavoritesPageResponse, MarketFavoritesQuery,
     },
+    providers::handlers::parse_provider,
     response::{ApiResponse, ok},
 };
 
 #[utoipa::path(
     put,
-    path = "/api/v1/markets/{market_id}/favorite",
+    path = "/api/v1/providers/{provider}/markets/{market_id}/favorite",
     tag = "Market Favorites",
     security(("bearer_auth" = [])),
-    params(
-        ("market_id" = String, Path, description = "Opaque market identifier")
-    ),
+    params(("provider" = String, Path), ("market_id" = String, Path)),
     responses(
-        (status = 200, description = "Market is favorited; repeated requests are idempotent", body = ApiResponse<MarketFavoriteStatusResponse>),
-        (status = 400, description = "Invalid market id", body = ErrorResponse),
+        (status = 200, description = "Provider-scoped favorite status", body = ApiResponse<MarketFavoriteStatusResponse>),
+        (status = 400, description = "Invalid provider or market", body = ErrorResponse),
         (status = 401, description = "Missing or invalid bearer token", body = ErrorResponse)
     )
 )]
-pub async fn favorite_market(
+pub async fn favorite_provider_market(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Path(market_id): Path<String>,
+    Path((provider, market_id)): Path<(String, String)>,
 ) -> Result<Json<ApiResponse<MarketFavoriteStatusResponse>>, AppError> {
     let user_id = authenticated_user_id(&state, &headers).await?;
+    let provider = parse_provider(&provider)?;
     let favorite = state
         .market_favorite_service
-        .favorite(&user_id, &market_id)
+        .favorite(provider, &user_id, &market_id)
         .await?;
-
     Ok(ok("Market favorited successfully", favorite))
 }
 
 #[utoipa::path(
     delete,
-    path = "/api/v1/markets/{market_id}/favorite",
+    path = "/api/v1/providers/{provider}/markets/{market_id}/favorite",
     tag = "Market Favorites",
     security(("bearer_auth" = [])),
-    params(
-        ("market_id" = String, Path, description = "Opaque market identifier")
-    ),
+    params(("provider" = String, Path), ("market_id" = String, Path)),
     responses(
-        (status = 200, description = "Market is not favorited; repeated requests are idempotent", body = ApiResponse<MarketFavoriteStatusResponse>),
-        (status = 400, description = "Invalid market id", body = ErrorResponse),
+        (status = 200, description = "Provider-scoped favorite status", body = ApiResponse<MarketFavoriteStatusResponse>),
+        (status = 400, description = "Invalid provider or market", body = ErrorResponse),
         (status = 401, description = "Missing or invalid bearer token", body = ErrorResponse)
     )
 )]
-pub async fn unfavorite_market(
+pub async fn unfavorite_provider_market(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Path(market_id): Path<String>,
+    Path((provider, market_id)): Path<(String, String)>,
 ) -> Result<Json<ApiResponse<MarketFavoriteStatusResponse>>, AppError> {
     let user_id = authenticated_user_id(&state, &headers).await?;
+    let provider = parse_provider(&provider)?;
     let favorite = state
         .market_favorite_service
-        .unfavorite(&user_id, &market_id)
+        .unfavorite(provider, &user_id, &market_id)
         .await?;
-
     Ok(ok("Market unfavorited successfully", favorite))
 }
 
 #[utoipa::path(
     get,
-    path = "/api/v1/markets/{market_id}/favorite",
+    path = "/api/v1/providers/{provider}/markets/{market_id}/favorite",
     tag = "Market Favorites",
     security(("bearer_auth" = [])),
-    params(
-        ("market_id" = String, Path, description = "Opaque market identifier")
-    ),
+    params(("provider" = String, Path), ("market_id" = String, Path)),
     responses(
-        (status = 200, description = "Current user's favorite status for the market", body = ApiResponse<MarketFavoriteStatusResponse>),
-        (status = 400, description = "Invalid market id", body = ErrorResponse),
+        (status = 200, description = "Provider-scoped favorite status", body = ApiResponse<MarketFavoriteStatusResponse>),
+        (status = 400, description = "Invalid provider or market", body = ErrorResponse),
         (status = 401, description = "Missing or invalid bearer token", body = ErrorResponse)
     )
 )]
-pub async fn get_market_favorite_status(
+pub async fn get_provider_market_favorite_status(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Path(market_id): Path<String>,
+    Path((provider, market_id)): Path<(String, String)>,
 ) -> Result<Json<ApiResponse<MarketFavoriteStatusResponse>>, AppError> {
     let user_id = authenticated_user_id(&state, &headers).await?;
+    let provider = parse_provider(&provider)?;
     let favorite = state
         .market_favorite_service
-        .status(&user_id, &market_id)
+        .status(provider, &user_id, &market_id)
         .await?;
-
     Ok(ok("Market favorite status fetched successfully", favorite))
 }
 
 #[utoipa::path(
     get,
-    path = "/api/v1/markets/favorites",
+    path = "/api/v1/providers/{provider}/markets/favorites",
     tag = "Market Favorites",
     security(("bearer_auth" = [])),
-    params(MarketFavoritesQuery),
+    params(("provider" = String, Path), MarketFavoritesQuery),
     responses(
-        (status = 200, description = "Current user's favorited market ids, newest first", body = ApiResponse<MarketFavoritesPageResponse>),
-        (status = 400, description = "Invalid cursor or page size", body = ErrorResponse),
+        (status = 200, description = "Provider-scoped favorited market ids", body = ApiResponse<MarketFavoritesPageResponse>),
+        (status = 400, description = "Invalid provider, cursor, or page size", body = ErrorResponse),
         (status = 401, description = "Missing or invalid bearer token", body = ErrorResponse)
     )
 )]
-pub async fn list_market_favorites(
+pub async fn list_provider_market_favorites(
     State(state): State<AppState>,
     headers: HeaderMap,
+    Path(provider): Path<String>,
     Query(query): Query<MarketFavoritesQuery>,
 ) -> Result<Json<ApiResponse<MarketFavoritesPageResponse>>, AppError> {
     let user_id = authenticated_user_id(&state, &headers).await?;
-    let favorites = state.market_favorite_service.list(&user_id, query).await?;
-
+    let provider = parse_provider(&provider)?;
+    let favorites = state
+        .market_favorite_service
+        .list(provider, &user_id, query)
+        .await?;
     Ok(ok("Market favorites fetched successfully", favorites))
 }
 

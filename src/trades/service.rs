@@ -14,37 +14,37 @@ use crate::{
         credentials::{decrypt_json, parse_encryption_key},
         wallet::{normalize_wallet_address, same_wallet},
     },
-    polymarket::{
-        client::{PolymarketClient, PolymarketSubmissionError},
-        dto::{PolymarketApiCredentials, PolymarketSignedOrderPayload},
+    providers::{
+        polymarket::{
+            client::PolymarketSubmissionError,
+            credentials::PolymarketApiCredentials,
+            dto::{PolymarketExecutionType, PolymarketSignedOrderPayload},
+        },
+        registry::{ProviderRegistry, ProviderTradingCredentials, ResolvedInstrument},
+        types::ProviderId,
     },
     trades::dto::{
         CancelMarketTradesRequest, CancelMultipleTradesRequest, CancelTradesResponse,
-        CreateTradeIntentRequest, CreateTradeIntentResponse, PolymarketExecutionType,
-        ReconcileTradeResponse, SubmitSignedTradeRequest, SubmitSignedTradeResponse,
-        TradeIntentResponse, TradeIntentStatus, TradeOrderType,
+        CreateTradeIntentRequest, CreateTradeIntentResponse, ReconcileTradeResponse,
+        SubmitSignedTradeRequest, SubmitSignedTradeResponse, TradeIntentResponse,
+        TradeIntentStatus, TradeOrderType,
     },
-    venue::SupportedVenue,
 };
 
 #[derive(Clone)]
 pub struct TradeService {
     credential_encryption_key: [u8; 32],
     db: Db,
-    polymarket_client: PolymarketClient,
+    providers: ProviderRegistry,
 }
 
 impl TradeService {
-    pub fn new(
-        db: Db,
-        polymarket_client: PolymarketClient,
-        credential_encryption_key: String,
-    ) -> Self {
+    pub fn new(db: Db, providers: ProviderRegistry, credential_encryption_key: String) -> Self {
         Self {
             credential_encryption_key: parse_encryption_key(&credential_encryption_key)
                 .expect("CREDENTIAL_ENCRYPTION_KEY must resolve to 32 bytes"),
             db,
-            polymarket_client,
+            providers,
         }
     }
 
@@ -76,26 +76,28 @@ impl TradeService {
         self.validate_readiness(user_id, payload.provider, &payload.wallet_address)
             .await?;
         validate_trade_payload(&payload)?;
-        let chain = payload.provider.chain();
-        let token_metadata = self
-            .polymarket_client
-            .fetch_token_metadata(&payload.token_id)
+        let (resolved, token_metadata) = self
+            .providers
+            .resolve_instrument(
+                payload.provider,
+                &payload.market_id,
+                &payload.token_id,
+                &payload.outcome,
+            )
             .await?;
+        let chain = resolved.chain;
         let now = Utc::now();
         let model = trade_intent::ActiveModel {
             id: Set(Uuid::new_v4().to_string()),
             user_id: Set(user_id.to_owned()),
             automation_id: Set(clean_optional(payload.automation_id)),
-            provider: Set(payload.provider.as_storage_value().to_owned()),
-            chain: Set(chain.as_storage_value().to_owned()),
-            chain_id: Set(chain.chain_id() as i64),
-            market_id: Set(clean_required(&payload.market_id, "market id is required")?),
-            market_title: Set(clean_required(
-                &payload.market_title,
-                "market title is required",
-            )?),
-            token_id: Set(clean_required(&payload.token_id, "token id is required")?),
-            outcome: Set(clean_required(&payload.outcome, "outcome is required")?),
+            provider: Set(resolved.provider.storage_value().to_owned()),
+            chain: Set(chain.storage_value().to_owned()),
+            chain_id: Set(chain.id().value() as i64),
+            market_id: Set(resolved.market_id),
+            market_title: Set(resolved.market_title),
+            token_id: Set(resolved.token_id),
+            outcome: Set(resolved.outcome),
             side: Set(payload.side.as_str().to_owned()),
             order_type: Set(payload.order_type.as_str().to_owned()),
             execution_type: Set(payload.execution_type.as_str().to_owned()),
@@ -140,14 +142,22 @@ impl TradeService {
     ) -> Result<SubmitSignedTradeResponse, AppError> {
         let trade = self.find_owned_trade(user_id, trade_id).await?;
         validate_submission_options(&payload, &trade)?;
-        let provider = SupportedVenue::from_storage_value(&trade.provider)
-            .ok_or_else(|| AppError::BadRequest("trade provider is invalid".to_owned()))?;
+        let provider = stored_provider(&trade.provider)?;
         self.validate_readiness(user_id, provider, &trade.wallet_address)
             .await?;
+        let (resolved, _) = self
+            .providers
+            .resolve_instrument(provider, &trade.market_id, &trade.token_id, &trade.outcome)
+            .await?;
+        validate_resolved_trade(&trade, &resolved)?;
         let credentials = self
             .credentials(user_id, provider, &trade.wallet_address)
             .await?;
-        let economics = validate_signed_order(&payload.signed_order, &trade, &credentials)?;
+        let economics = match &credentials {
+            ProviderTradingCredentials::Polymarket(credentials) => {
+                validate_signed_order(&payload.signed_order, &trade, credentials)?
+            }
+        };
         let signed_order_hash = signed_order_hash(&payload.signed_order)?;
 
         if trade.signed_order_hash.as_deref() == Some(&signed_order_hash) {
@@ -181,8 +191,8 @@ impl TradeService {
             signed_order: payload.signed_order,
         };
         let provider_response = match self
-            .polymarket_client
-            .submit_signed_order(&credentials, &polymarket_payload)
+            .providers
+            .submit_signed_order(provider, &credentials, &polymarket_payload)
             .await
         {
             Ok(response) => response,
@@ -310,21 +320,20 @@ impl TradeService {
             });
         };
 
-        let provider = SupportedVenue::from_storage_value(&trade.provider)
-            .ok_or_else(|| AppError::BadRequest("trade provider is invalid".to_owned()))?;
+        let provider = stored_provider(&trade.provider)?;
         let credentials = self
             .credentials(user_id, provider, &trade.wallet_address)
             .await?;
         let order = self
-            .polymarket_client
-            .get_order(&credentials, &provider_order_id)
+            .providers
+            .get_order(provider, &credentials, &provider_order_id)
             .await?;
         let mut trade_payloads = Vec::new();
         if let Some(trade_ids) = order.get("associate_trades").and_then(Value::as_array) {
             for provider_trade_id in trade_ids.iter().filter_map(Value::as_str) {
                 let payload = self
-                    .polymarket_client
-                    .get_trades(&credentials, provider_trade_id)
+                    .providers
+                    .get_trades(provider, &credentials, provider_trade_id)
                     .await?;
                 trade_payloads.extend(provider_trade_values(&payload));
             }
@@ -353,7 +362,10 @@ impl TradeService {
 
         Ok(ReconcileTradeResponse {
             provider_lookup_available: true,
-            resolution: format!("Polymarket REST reconciliation resolved status to {status}"),
+            resolution: format!(
+                "{} REST reconciliation resolved status to {status}",
+                provider.route_value()
+            ),
             trade: trade_response(self.find_owned_trade(user_id, trade_id).await?),
         })
     }
@@ -374,14 +386,15 @@ impl TradeService {
             });
         }
         let order_id = required_provider_order_id(&trade)?;
+        let provider = stored_provider(&trade.provider)?;
         let credentials = self.credentials_for_trade(user_id, &trade).await?;
         self.mark_cancellation_requested(user_id, &[trade.id.clone()])
             .await?;
         let provider_response = self
-            .polymarket_client
-            .cancel_order(&credentials, &order_id)
+            .providers
+            .cancel_order(provider, &credentials, &order_id)
             .await?;
-        self.apply_cancellation_confirmation(user_id, &provider_response)
+        self.apply_cancellation_confirmation(user_id, provider, &provider_response)
             .await?;
         Ok(CancelTradesResponse {
             provider_response,
@@ -414,6 +427,12 @@ impl TradeService {
         let first = trades
             .first()
             .ok_or_else(|| AppError::BadRequest("trade_ids are required".to_owned()))?;
+        let provider = stored_provider(&first.provider)?;
+        if trades.iter().any(|trade| trade.provider != first.provider) {
+            return Err(AppError::BadRequest(
+                "all cancellations in one request must use the same stored provider".to_owned(),
+            ));
+        }
         let credentials = self.credentials_for_trade(user_id, first).await?;
         let order_ids = trades
             .iter()
@@ -433,10 +452,10 @@ impl TradeService {
         self.mark_cancellation_requested(user_id, &trade_ids)
             .await?;
         let provider_response = self
-            .polymarket_client
-            .cancel_orders(&credentials, &order_ids)
+            .providers
+            .cancel_orders(provider, &credentials, &order_ids)
             .await?;
-        self.apply_cancellation_confirmation(user_id, &provider_response)
+        self.apply_cancellation_confirmation(user_id, provider, &provider_response)
             .await?;
         let refreshed = trade_intent::Entity::find()
             .filter(trade_intent::Column::UserId.eq(user_id))
@@ -450,21 +469,53 @@ impl TradeService {
     }
 
     pub async fn cancel_all(&self, user_id: &str) -> Result<CancelTradesResponse, AppError> {
-        let credentials = self.credentials_for_user(user_id).await?;
         let trades = trade_intent::Entity::find()
             .filter(trade_intent::Column::UserId.eq(user_id))
             .filter(trade_intent::Column::ProviderOrderId.is_not_null())
+            .filter(trade_intent::Column::Status.is_in(cancellable_order_statuses()))
             .all(&self.db)
             .await?;
-        let trade_ids = cancellable_trade_ids(&trades);
-        self.mark_cancellation_requested(user_id, &trade_ids)
-            .await?;
-        let provider_response = self
-            .polymarket_client
-            .cancel_all_orders(&credentials)
-            .await?;
-        self.apply_cancellation_confirmation(user_id, &provider_response)
-            .await?;
+        if trades.is_empty() {
+            return Ok(CancelTradesResponse {
+                provider_response: json!({"canceled": [], "not_canceled": {}}),
+                trades: Vec::new(),
+            });
+        }
+
+        let groups = group_trades_by_provider(trades)?;
+        let aggregate_response = groups.len() > 1;
+        let mut provider_responses = serde_json::Map::new();
+        let mut single_response = None;
+        let mut trade_ids = Vec::new();
+
+        for (provider, provider_trades) in groups {
+            let first = provider_trades
+                .first()
+                .expect("provider trade group is never empty");
+            let credentials = self.credentials_for_trade(user_id, first).await?;
+            let provider_trade_ids = provider_trades
+                .iter()
+                .map(|trade| trade.id.clone())
+                .collect::<Vec<_>>();
+            self.mark_cancellation_requested(user_id, &provider_trade_ids)
+                .await?;
+            let response = self
+                .providers
+                .cancel_all_orders(provider, &credentials)
+                .await?;
+            self.apply_cancellation_confirmation(user_id, provider, &response)
+                .await?;
+
+            if aggregate_response {
+                provider_responses.insert(provider.api_value().to_owned(), response);
+            } else {
+                single_response = Some(response);
+            }
+            trade_ids.extend(provider_trade_ids);
+        }
+
+        let provider_response =
+            single_response.unwrap_or_else(|| Value::Object(provider_responses));
         Ok(CancelTradesResponse {
             provider_response,
             trades: self.list_models_by_ids(user_id, trade_ids).await?,
@@ -478,22 +529,30 @@ impl TradeService {
     ) -> Result<CancelTradesResponse, AppError> {
         let market_id = clean_required(&payload.market_id, "market_id is required")?;
         let token_id = clean_required(&payload.token_id, "token_id is required")?;
-        let credentials = self.credentials_for_user(user_id).await?;
+        let provider = payload.provider;
         let trades = trade_intent::Entity::find()
             .filter(trade_intent::Column::UserId.eq(user_id))
+            .filter(trade_intent::Column::Provider.eq(provider.storage_value()))
             .filter(trade_intent::Column::MarketId.eq(&market_id))
             .filter(trade_intent::Column::TokenId.eq(&token_id))
             .filter(trade_intent::Column::ProviderOrderId.is_not_null())
             .all(&self.db)
             .await?;
+        let Some(first) = trades.first() else {
+            return Ok(CancelTradesResponse {
+                provider_response: json!({"canceled": [], "not_canceled": {}}),
+                trades: Vec::new(),
+            });
+        };
+        let credentials = self.credentials_for_trade(user_id, first).await?;
         let trade_ids = cancellable_trade_ids(&trades);
         self.mark_cancellation_requested(user_id, &trade_ids)
             .await?;
         let provider_response = self
-            .polymarket_client
-            .cancel_market_orders(&credentials, &market_id, &token_id)
+            .providers
+            .cancel_market_orders(provider, &credentials, &market_id, &token_id)
             .await?;
-        self.apply_cancellation_confirmation(user_id, &provider_response)
+        self.apply_cancellation_confirmation(user_id, provider, &provider_response)
             .await?;
         Ok(CancelTradesResponse {
             provider_response,
@@ -510,6 +569,7 @@ impl TradeService {
         economics: &SignedEconomics,
     ) -> Result<trade_intent::Model, AppError> {
         let duplicate = trade_intent::Entity::find()
+            .filter(trade_intent::Column::Provider.eq(&trade.provider))
             .filter(trade_intent::Column::SignedOrderHash.eq(signed_order_hash))
             .filter(trade_intent::Column::Id.ne(&trade.id))
             .one(&self.db)
@@ -664,32 +724,25 @@ impl TradeService {
     async fn validate_readiness(
         &self,
         user_id: &str,
-        provider: SupportedVenue,
+        provider: ProviderId,
         wallet_address: &str,
     ) -> Result<(), AppError> {
-        if provider != SupportedVenue::Polymarket {
-            return Err(AppError::BadRequest(
-                "unsupported trading provider".to_owned(),
-            ));
-        }
-
+        self.providers.adapter(provider)?;
         let wallet_address = normalize_wallet_address(wallet_address)?;
         let user = user::Entity::find_by_id(user_id.to_owned())
             .one(&self.db)
             .await?
             .ok_or(AppError::Unauthorized)?;
-        let preferred_provider = user
-            .preferred_trading_provider
-            .as_deref()
-            .and_then(SupportedVenue::from_storage_value)
+        let preferred_provider = ProviderId::from_storage(&user.preferred_trading_provider)
             .ok_or_else(|| {
                 AppError::BadRequest("select a trading provider before trading".to_owned())
             })?;
 
         if preferred_provider != provider {
-            return Err(AppError::BadRequest(
-                "selected trading provider does not match this trade".to_owned(),
-            ));
+            return Err(AppError::ProviderValidation {
+                code: "SELECTED_PROVIDER_MISMATCH",
+                message: "selected trading provider does not match this trade".to_owned(),
+            });
         }
 
         let Some(stored_wallet) = user.primary_wallet_address else {
@@ -711,27 +764,9 @@ impl TradeService {
         &self,
         user_id: &str,
         trade: &trade_intent::Model,
-    ) -> Result<PolymarketApiCredentials, AppError> {
-        let provider = SupportedVenue::from_storage_value(&trade.provider)
-            .ok_or_else(|| AppError::BadRequest("trade provider is invalid".to_owned()))?;
+    ) -> Result<ProviderTradingCredentials, AppError> {
+        let provider = stored_provider(&trade.provider)?;
         self.credentials(user_id, provider, &trade.wallet_address)
-            .await
-    }
-
-    async fn credentials_for_user(
-        &self,
-        user_id: &str,
-    ) -> Result<PolymarketApiCredentials, AppError> {
-        let user = user::Entity::find_by_id(user_id.to_owned())
-            .one(&self.db)
-            .await?
-            .ok_or(AppError::Unauthorized)?;
-        let wallet_address = user.primary_wallet_address.ok_or_else(|| {
-            AppError::BadRequest("connect a wallet before managing orders".to_owned())
-        })?;
-        self.validate_readiness(user_id, SupportedVenue::Polymarket, &wallet_address)
-            .await?;
-        self.credentials(user_id, SupportedVenue::Polymarket, &wallet_address)
             .await
     }
 
@@ -761,6 +796,7 @@ impl TradeService {
     async fn apply_cancellation_confirmation(
         &self,
         user_id: &str,
+        provider: ProviderId,
         provider_response: &Value,
     ) -> Result<(), AppError> {
         let canceled = provider_response
@@ -787,6 +823,7 @@ impl TradeService {
         trade_intent::Entity::update_many()
             .set(active)
             .filter(trade_intent::Column::UserId.eq(user_id))
+            .filter(trade_intent::Column::Provider.eq(provider.storage_value()))
             .filter(trade_intent::Column::ProviderOrderId.is_in(canceled))
             .filter(
                 trade_intent::Column::Status.eq(TradeIntentStatus::CancellationRequested.as_str()),
@@ -816,13 +853,13 @@ impl TradeService {
     async fn credentials(
         &self,
         user_id: &str,
-        provider: SupportedVenue,
+        provider: ProviderId,
         wallet_address: &str,
-    ) -> Result<PolymarketApiCredentials, AppError> {
+    ) -> Result<ProviderTradingCredentials, AppError> {
         let wallet_address = normalize_wallet_address(wallet_address)?;
         let connection = venue_connection::Entity::find()
             .filter(venue_connection::Column::UserId.eq(user_id))
-            .filter(venue_connection::Column::Venue.eq(provider.id()))
+            .filter(venue_connection::Column::Provider.eq(provider.storage_value()))
             .filter(venue_connection::Column::Enabled.eq(true))
             .filter(venue_connection::Column::Status.eq("active"))
             .one(&self.db)
@@ -852,15 +889,52 @@ impl TradeService {
                 "Polymarket EOA funder, account, and connected wallet must match".to_owned(),
             ));
         }
-        Ok(PolymarketApiCredentials {
-            address: wallet_address,
-            funder,
-            signature_type,
-            api_key: string_config(&config, &["apiKey", "api_key", "key"])?,
-            secret: string_config(&config, &["secret"])?,
-            passphrase: string_config(&config, &["passphrase"])?,
-        })
+        Ok(ProviderTradingCredentials::Polymarket(
+            PolymarketApiCredentials {
+                address: wallet_address,
+                funder,
+                signature_type,
+                api_key: string_config(&config, &["apiKey", "api_key", "key"])?,
+                secret: string_config(&config, &["secret"])?,
+                passphrase: string_config(&config, &["passphrase"])?,
+            },
+        ))
     }
+}
+
+fn stored_provider(value: &str) -> Result<ProviderId, AppError> {
+    ProviderId::from_storage(value)
+        .ok_or_else(|| AppError::BadRequest("stored trade provider is invalid".to_owned()))
+}
+
+fn validate_resolved_trade(
+    trade: &trade_intent::Model,
+    resolved: &ResolvedInstrument,
+) -> Result<(), AppError> {
+    if trade.provider != resolved.provider.storage_value() {
+        return Err(AppError::ProviderValidation {
+            code: "PROVIDER_MISMATCH",
+            message: "resolved provider does not match the stored trade provider".to_owned(),
+        });
+    }
+    if trade.chain != resolved.chain.storage_value()
+        || trade.chain_id != resolved.chain.id().value() as i64
+    {
+        return Err(AppError::ProviderValidation {
+            code: "PROVIDER_CHAIN_MISMATCH",
+            message: "resolved chain does not match the stored trade chain".to_owned(),
+        });
+    }
+    if trade.market_id != resolved.market_id
+        || trade.token_id != resolved.token_id
+        || !trade.outcome.eq_ignore_ascii_case(&resolved.outcome)
+    {
+        return Err(AppError::ProviderValidation {
+            code: "PROVIDER_INSTRUMENT_MISMATCH",
+            message: "resolved market instrument does not match the stored trade".to_owned(),
+        });
+    }
+    Ok(())
 }
 
 fn required_provider_order_id(trade: &trade_intent::Model) -> Result<String, AppError> {
@@ -884,16 +958,37 @@ fn cancellable_statuses() -> Vec<String> {
     .collect()
 }
 
+fn cancellable_order_statuses() -> Vec<String> {
+    let mut statuses = cancellable_statuses();
+    statuses.push(TradeIntentStatus::CancellationRequested.as_str().to_owned());
+    statuses
+}
+
 fn cancellable_trade_ids(trades: &[trade_intent::Model]) -> Vec<String> {
-    let statuses = cancellable_statuses();
+    let statuses = cancellable_order_statuses();
     trades
         .iter()
-        .filter(|trade| {
-            statuses.contains(&trade.status)
-                || trade.status == TradeIntentStatus::CancellationRequested.as_str()
-        })
+        .filter(|trade| statuses.contains(&trade.status))
         .map(|trade| trade.id.clone())
         .collect()
+}
+
+fn group_trades_by_provider(
+    trades: Vec<trade_intent::Model>,
+) -> Result<Vec<(ProviderId, Vec<trade_intent::Model>)>, AppError> {
+    let mut groups: Vec<(ProviderId, Vec<trade_intent::Model>)> = Vec::new();
+    for trade in trades {
+        let provider = stored_provider(&trade.provider)?;
+        if let Some((_, provider_trades)) = groups
+            .iter_mut()
+            .find(|(group_provider, _)| *group_provider == provider)
+        {
+            provider_trades.push(trade);
+        } else {
+            groups.push((provider, vec![trade]));
+        }
+    }
+    Ok(groups)
 }
 
 fn provider_trade_values(payload: &Value) -> Vec<Value> {
@@ -1328,16 +1423,20 @@ mod tests {
 
     use crate::{
         entities::trade_intent,
-        polymarket::dto::PolymarketApiCredentials,
-        trades::dto::{
-            CreateTradeIntentRequest, PolymarketExecutionType, SubmitSignedTradeRequest,
-            TradeOrderType, TradeSide,
+        providers::{
+            polymarket::{credentials::PolymarketApiCredentials, dto::PolymarketExecutionType},
+            registry::ResolvedInstrument,
+            types::{Chain, ProviderId},
         },
-        venue::SupportedVenue,
+        trades::dto::{
+            CreateTradeIntentRequest, SubmitSignedTradeRequest, TradeIntentStatus, TradeOrderType,
+            TradeSide,
+        },
     };
 
     use super::{
-        provider_order_id, provider_status, signed_order_hash, validate_signed_order,
+        cancellable_order_statuses, group_trades_by_provider, provider_order_id, provider_status,
+        signed_order_hash, stored_provider, validate_resolved_trade, validate_signed_order,
         validate_submission_options, validate_trade_payload,
     };
 
@@ -1403,7 +1502,7 @@ mod tests {
             market_title: "Market".to_owned(),
             outcome: "YES".to_owned(),
             price: Some(0.5),
-            provider: SupportedVenue::Polymarket,
+            provider: ProviderId::Polymarket,
             side: TradeSide::Buy,
             order_type: TradeOrderType::Limit,
             execution_type: PolymarketExecutionType::Gtc,
@@ -1542,6 +1641,51 @@ mod tests {
             signed_order_hash(&first).unwrap(),
             signed_order_hash(&second).unwrap()
         );
+    }
+
+    #[test]
+    fn cancel_all_groups_only_cancellable_stored_provider_orders() {
+        let statuses = cancellable_order_statuses();
+        assert!(statuses.contains(&TradeIntentStatus::Submitted.as_str().to_owned()));
+        assert!(statuses.contains(&TradeIntentStatus::CancellationRequested.as_str().to_owned()));
+        assert!(!statuses.contains(&TradeIntentStatus::Filled.as_str().to_owned()));
+        assert!(!statuses.contains(&TradeIntentStatus::Cancelled.as_str().to_owned()));
+
+        let mut first = trade();
+        first.status = TradeIntentStatus::Submitted.as_str().to_owned();
+        first.provider_order_id = Some("order-1".to_owned());
+        let mut second = first.clone();
+        second.id = "trade-2".to_owned();
+        second.provider_order_id = Some("order-2".to_owned());
+        let groups = group_trades_by_provider(vec![first, second]).unwrap();
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].0, ProviderId::Polymarket);
+        assert_eq!(groups[0].1.len(), 2);
+    }
+
+    #[test]
+    fn existing_order_lifecycle_uses_stored_provider_identity() {
+        let persisted = trade();
+        assert_eq!(
+            stored_provider(&persisted.provider).unwrap(),
+            ProviderId::Polymarket
+        );
+    }
+
+    #[test]
+    fn revalidation_rejects_stored_chain_or_instrument_drift() {
+        let mut persisted = trade();
+        let resolved = ResolvedInstrument {
+            chain: Chain::Polygon,
+            market_id: persisted.market_id.clone(),
+            market_title: persisted.market_title.clone(),
+            outcome: persisted.outcome.clone(),
+            provider: ProviderId::Polymarket,
+            token_id: persisted.token_id.clone(),
+        };
+        assert!(validate_resolved_trade(&persisted, &resolved).is_ok());
+        persisted.chain_id = 1;
+        assert!(validate_resolved_trade(&persisted, &resolved).is_err());
     }
 
     #[test]

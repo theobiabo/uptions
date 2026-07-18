@@ -1,9 +1,9 @@
 use chrono::{DateTime, Utc};
 use sea_orm::{ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, Set};
 
-use crate::entities::venue_connection;
+use crate::{entities::venue_connection, providers::types::ProviderId};
 
-pub const POLYMARKET_VENUE: &str = "polymarket";
+pub const POLYMARKET_PROVIDER: &str = ProviderId::Polymarket.storage_value();
 pub const ACTIVE_STATUS: &str = "active";
 pub const WALLET_MISSING_STATUS: &str = "action_required_wallet_missing";
 pub const WALLET_MISMATCH_STATUS: &str = "action_required_wallet_mismatch";
@@ -126,7 +126,7 @@ fn matching_wallet_restore_update(
             ..Default::default()
         })
         .filter(venue_connection::Column::UserId.eq(user_id))
-        .filter(venue_connection::Column::Venue.eq(POLYMARKET_VENUE))
+        .filter(venue_connection::Column::Provider.eq(POLYMARKET_PROVIDER))
         .filter(venue_connection::Column::Enabled.eq(true))
         .filter(venue_connection::Column::Status.eq(WALLET_MISMATCH_STATUS))
         .filter(venue_connection::Column::AccountIdentifier.eq(wallet_address))
@@ -144,7 +144,7 @@ fn wallet_mismatch_update(
             ..Default::default()
         })
         .filter(venue_connection::Column::UserId.eq(user_id))
-        .filter(venue_connection::Column::Venue.eq(POLYMARKET_VENUE))
+        .filter(venue_connection::Column::Provider.eq(POLYMARKET_PROVIDER))
         .filter(venue_connection::Column::Enabled.eq(true))
         .filter(venue_connection::Column::Status.eq(ACTIVE_STATUS))
         .filter(venue_connection::Column::AccountIdentifier.ne(wallet_address))
@@ -214,7 +214,7 @@ mod tests {
         let sql = statement.to_string();
 
         assert!(sql.contains("\"user_id\" = 'user-1'"));
-        assert!(sql.contains("\"venue\" = 'polymarket'"));
+        assert!(sql.contains("\"provider\" = 'POLYMARKET'"));
         assert!(sql.contains("\"enabled\" = TRUE"));
         assert!(sql.contains("\"status\" = 'action_required_wallet_mismatch'"));
         assert!(
@@ -234,7 +234,7 @@ mod tests {
         let sql = statement.to_string();
 
         assert!(sql.contains("\"user_id\" = 'user-1'"));
-        assert!(sql.contains("\"venue\" = 'polymarket'"));
+        assert!(sql.contains("\"provider\" = 'POLYMARKET'"));
         assert!(sql.contains("\"enabled\" = TRUE"));
         assert!(sql.contains("\"status\" = 'active'"));
         assert!(

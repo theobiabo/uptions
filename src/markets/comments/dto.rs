@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
 
+use crate::providers::types::ProviderId;
+
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct CreateMarketCommentRequest {
     #[schema(example = "I think the probability is understated.", max_length = 2000)]
@@ -28,6 +30,7 @@ pub struct MarketCommentAuthorResponse {
 pub struct MarketCommentResponse {
     #[schema(example = "96b5ce61-0c67-46a0-9925-bfbe3af0aa82")]
     pub id: String,
+    pub provider: ProviderId,
     #[schema(example = "123456")]
     pub market_id: String,
     pub author: MarketCommentAuthorResponse,
@@ -63,6 +66,7 @@ mod tests {
             event_type: "market_comment.created".to_owned(),
             comment: MarketCommentResponse {
                 id: "comment-id".to_owned(),
+                provider: crate::providers::types::ProviderId::Polymarket,
                 market_id: "market-id".to_owned(),
                 author: MarketCommentAuthorResponse {
                     id: "user-id".to_owned(),
@@ -77,6 +81,7 @@ mod tests {
         let value = serde_json::to_value(event).unwrap();
         let author = value["comment"]["author"].as_object().unwrap();
 
+        assert_eq!(value["comment"]["provider"], "POLYMARKET");
         assert_eq!(author.len(), 2);
         assert_eq!(author["id"], "user-id");
         assert_eq!(author["username"], "alice");

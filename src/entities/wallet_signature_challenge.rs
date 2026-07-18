@@ -7,6 +7,8 @@ pub struct Model {
     pub id: String,
     pub user_id: String,
     pub purpose: String,
+    pub provider: String,
+    pub chain: String,
     pub chain_id: i64,
     pub wallet_address: String,
     pub nonce_hash: String,

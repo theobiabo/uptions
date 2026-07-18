@@ -4,7 +4,7 @@ use base64::{
     Engine,
     engine::general_purpose::{STANDARD, URL_SAFE},
 };
-use chrono::Utc;
+
 use hmac::{Hmac, Mac};
 use reqwest::{Client, Method, StatusCode};
 use serde_json::{Value, json};
@@ -13,9 +13,13 @@ use sha2::Sha256;
 use crate::{
     config::AppConfig,
     error::AppError,
-    polymarket::dto::{
-        MarketsQuery, OrderBookLevelResponse, OrderBookResponse, PolymarketApiCredentials,
-        PolymarketSignedOrderPayload, PolymarketTokenMetadataResponse,
+    markets::types::MarketListQuery,
+    providers::polymarket::{
+        credentials::PolymarketApiCredentials,
+        dto::{
+            PolymarketMarket, PolymarketMarketsQuery, PolymarketSignedOrderPayload,
+            PolymarketTokenMetadataResponse,
+        },
     },
 };
 
@@ -50,11 +54,16 @@ impl PolymarketClient {
         }
     }
 
-    pub async fn fetch_markets(&self, query: &MarketsQuery) -> Result<Value, AppError> {
+    pub async fn fetch_markets(
+        &self,
+        query: &MarketListQuery,
+        offset: u32,
+    ) -> Result<Vec<PolymarketMarket>, AppError> {
+        let upstream_query = PolymarketMarketsQuery::new(query, offset);
         let response = self
             .http_client
             .get(format!("{}/markets", self.gamma_host))
-            .query(query)
+            .query(&upstream_query)
             .send()
             .await
             .map_err(|error| AppError::ExternalApiError(error.to_string()))?;
@@ -70,12 +79,12 @@ impl PolymarketClient {
         }
 
         response
-            .json::<Value>()
+            .json::<Vec<PolymarketMarket>>()
             .await
             .map_err(|error| AppError::ExternalApiError(error.to_string()))
     }
 
-    pub async fn fetch_order_book(&self, token_id: &str) -> Result<OrderBookResponse, AppError> {
+    pub async fn fetch_order_book(&self, token_id: &str) -> Result<Value, AppError> {
         let token_id = token_id.trim();
 
         if token_id.is_empty() {
@@ -100,31 +109,23 @@ impl PolymarketClient {
             return Err(AppError::ExternalApiError(body));
         }
 
-        let payload = response
+        response
             .json::<Value>()
             .await
-            .map_err(|error| AppError::ExternalApiError(error.to_string()))?;
-
-        Ok(normalize_order_book(token_id, payload))
+            .map_err(|error| AppError::ExternalApiError(error.to_string()))
     }
 
-    pub async fn fetch_market(&self, market_id: &str) -> Result<Value, AppError> {
-        let query = MarketsQuery {
+    pub async fn fetch_market(&self, market_id: &str) -> Result<PolymarketMarket, AppError> {
+        let query = MarketListQuery {
             id: Some(market_id.to_owned()),
             ..Default::default()
         };
-        let markets = self.fetch_markets(&query).await?;
+        let markets = self.fetch_markets(&query, 0).await?;
 
-        match markets {
-            Value::Array(items) => items
-                .into_iter()
-                .next()
-                .ok_or_else(|| AppError::NotFound("Market not found".to_owned())),
-            market if market.is_object() => Ok(market),
-            _ => Err(AppError::ExternalApiError(
-                "Unexpected Polymarket market payload".to_owned(),
-            )),
-        }
+        markets
+            .into_iter()
+            .next()
+            .ok_or_else(|| AppError::NotFound("Market not found".to_owned()))
     }
 
     pub async fn fetch_token_metadata(
@@ -566,112 +567,11 @@ fn value_to_u64(value: &Value) -> Option<u64> {
     }
 }
 
-fn normalize_order_book(token_id: &str, payload: Value) -> OrderBookResponse {
-    let mut bids = levels_from_payload(&payload, "bids");
-    let mut asks = levels_from_payload(&payload, "asks");
-
-    bids.sort_by(|a, b| b.price.total_cmp(&a.price));
-    asks.sort_by(|a, b| a.price.total_cmp(&b.price));
-
-    let max_usd = bids
-        .iter()
-        .chain(asks.iter())
-        .map(|level| level.usd)
-        .fold(0.0, f64::max);
-
-    if max_usd > 0.0 {
-        for level in bids.iter_mut().chain(asks.iter_mut()) {
-            level.depth_percent = ((level.usd / max_usd) * 100.0).clamp(0.0, 100.0);
-        }
-    }
-
-    let best_bid = bids.first().map(|level| level.price);
-    let best_ask = asks.first().map(|level| level.price);
-    let spread = best_bid
-        .zip(best_ask)
-        .map(|(bid, ask)| (ask - bid).max(0.0));
-
-    OrderBookResponse {
-        asks,
-        best_ask,
-        best_bid,
-        bids,
-        last_traded: number_from_keys(
-            &payload,
-            &["last_traded", "lastTradePrice", "last_trade_price"],
-        ),
-        spread,
-        token_id: token_id.to_owned(),
-        updated_at: Utc::now().to_rfc3339(),
-    }
-}
-
-fn levels_from_payload(payload: &Value, key: &str) -> Vec<OrderBookLevelResponse> {
-    payload
-        .get(key)
-        .and_then(Value::as_array)
-        .map(|items| items.iter().filter_map(level_from_value).collect())
-        .unwrap_or_default()
-}
-
-fn level_from_value(value: &Value) -> Option<OrderBookLevelResponse> {
-    let price = number_from_keys(value, &["price", "p"])?;
-    let shares = number_from_keys(value, &["size", "shares", "s"])?;
-
-    if !price.is_finite() || !shares.is_finite() || price <= 0.0 || shares <= 0.0 {
-        return None;
-    }
-
-    Some(OrderBookLevelResponse {
-        depth_percent: 0.0,
-        price,
-        shares,
-        usd: price * shares,
-    })
-}
-
-fn number_from_keys(value: &Value, keys: &[&str]) -> Option<f64> {
-    keys.iter().find_map(|key| number_value(value.get(*key)?))
-}
-
-fn number_value(value: &Value) -> Option<f64> {
-    match value {
-        Value::Number(number) => number.as_f64(),
-        Value::String(text) => text.parse::<f64>().ok(),
-        _ => None,
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
-
     use reqwest::StatusCode;
 
-    use super::{PolymarketSubmissionError, classify_submission_http_error, normalize_order_book};
-
-    #[test]
-    fn sorts_bids_descending_and_asks_ascending() {
-        let book = normalize_order_book(
-            "token",
-            json!({
-                "bids": [
-                    {"price": "0.40", "size": "10"},
-                    {"price": "0.60", "size": "5"}
-                ],
-                "asks": [
-                    {"price": "0.80", "size": "3"},
-                    {"price": "0.65", "size": "4"}
-                ]
-            }),
-        );
-
-        assert_eq!(book.bids[0].price, 0.60);
-        assert_eq!(book.asks[0].price, 0.65);
-        assert_eq!(book.best_bid, Some(0.60));
-        assert_eq!(book.best_ask, Some(0.65));
-        assert!((book.spread.unwrap() - 0.05).abs() < f64::EPSILON);
-    }
+    use super::{PolymarketSubmissionError, classify_submission_http_error};
 
     #[test]
     fn classifies_uncertain_http_submission_outcomes_for_reconciliation() {

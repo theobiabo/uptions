@@ -6,7 +6,9 @@ use crate::{
     db::{Db, connect},
     markets::{comments::service::MarketCommentService, favorites::service::MarketFavoriteService},
     notifications::service::NotificationService,
-    polymarket::{client::PolymarketClient, user_stream::PolymarketUserStreamSupervisor},
+    providers::{
+        polymarket::user_stream::PolymarketUserStreamSupervisor, registry::ProviderRegistry,
+    },
     trades::service::TradeService,
     users::service::UserService,
 };
@@ -24,7 +26,7 @@ pub struct AppState {
     pub market_comment_service: MarketCommentService,
     pub market_favorite_service: MarketFavoriteService,
     pub notification_service: NotificationService,
-    pub polymarket_client: PolymarketClient,
+    pub providers: ProviderRegistry,
     pub trade_service: TradeService,
     pub user_service: UserService,
 }
@@ -35,15 +37,11 @@ impl AppState {
         Migrator::up(&db, None).await?;
 
         let notification_service = NotificationService::new();
+        let providers = ProviderRegistry::new(&config);
 
-        let automation_service = AutomationService::new(db.clone(), notification_service.clone());
-        AutomationExecutor::new(
-            db.clone(),
-            automation_service.clone(),
-            PolymarketClient::new(&config),
-        )
-        .start();
-        let polymarket_client = PolymarketClient::new(&config);
+        let automation_service =
+            AutomationService::new(db.clone(), notification_service.clone(), providers.clone());
+        AutomationExecutor::new(db.clone(), automation_service.clone(), providers.clone()).start();
         PolymarketUserStreamSupervisor::new(
             db.clone(),
             config.credential_encryption_key.clone(),
@@ -52,7 +50,7 @@ impl AppState {
         .start();
         let trade_service = TradeService::new(
             db.clone(),
-            polymarket_client.clone(),
+            providers.clone(),
             config.credential_encryption_key.clone(),
         );
 
@@ -69,7 +67,7 @@ impl AppState {
             market_comment_service: MarketCommentService::new(db.clone()),
             market_favorite_service: MarketFavoriteService::new(db.clone()),
             notification_service,
-            polymarket_client,
+            providers,
             trade_service,
             user_service: UserService::new(db),
         })

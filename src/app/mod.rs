@@ -30,7 +30,7 @@ use crate::{
     analytics::handlers::analytics_overview,
     app::{docs::swagger_ui, rate_limit::RateLimiter, state::AppState},
     auth::handlers::{
-        connect_polymarket, create_challenge, current_user, forgot_password, login, logout,
+        connect_provider, create_challenge, current_user, forgot_password, login, logout,
         logout_all, reset_password, signup, update_email, update_password, update_username,
         verify_challenge, verify_email,
     },
@@ -42,24 +42,30 @@ use crate::{
     config::AppConfig,
     error::ErrorResponse,
     markets::{
-        comments::handlers::{create_market_comment, list_market_comments, stream_market_comments},
+        comments::handlers::{
+            create_provider_market_comment, list_provider_market_comments,
+            stream_provider_market_comments,
+        },
         favorites::handlers::{
-            favorite_market, get_market_favorite_status, list_market_favorites, unfavorite_market,
+            favorite_provider_market, get_provider_market_favorite_status,
+            list_provider_market_favorites, unfavorite_provider_market,
         },
     },
     mcp::handlers::{
         approve_mcp_approval, get_mcp_approval, handle_mcp, list_mcp_approvals, reject_mcp_approval,
     },
     notifications::handlers::stream_alerts,
-    polymarket::handlers::{fetch_market, fetch_markets, fetch_order_book, fetch_venue_chain},
+    providers::handlers::{
+        fetch_market as fetch_provider_market, fetch_markets as fetch_provider_markets,
+        fetch_order_book as fetch_provider_order_book, get_provider, list_providers,
+    },
     response::{ApiResponse, ok},
     trades::handlers::{
         cancel_all_trades, cancel_market_trades, cancel_multiple_trades, cancel_trade,
         create_trade_intent, get_trade, list_trades, reconcile_trade, submit_signed_trade,
     },
     users::handler::{
-        create_wallet_challenge, join_waitlist, list_trading_providers, update_trading_provider,
-        update_wallet,
+        create_wallet_challenge, join_waitlist, update_trading_provider, update_wallet,
     },
 };
 
@@ -124,12 +130,17 @@ fn auth_router(config: &AppConfig) -> Router<AppState> {
         ))
 }
 
-fn external_proxy_router(config: &AppConfig) -> Router<AppState> {
+fn provider_market_router(config: &AppConfig) -> Router<AppState> {
     Router::new()
-        .route("/markets", get(fetch_markets))
-        .route("/markets/{market_id}", get(fetch_market))
-        .route("/order-books/{token_id}", get(fetch_order_book))
-        .route("/venue-chain", get(fetch_venue_chain))
+        .route("/providers/{provider}/markets", get(fetch_provider_markets))
+        .route(
+            "/providers/{provider}/markets/{market_id}",
+            get(fetch_provider_market),
+        )
+        .route(
+            "/providers/{provider}/markets/{market_id}/order-book",
+            get(fetch_provider_order_book),
+        )
         .layer(middleware::from_fn_with_state(
             RateLimiter::per_minute(config.external_rate_limit_per_minute),
             rate_limit::enforce,
@@ -138,11 +149,32 @@ fn external_proxy_router(config: &AppConfig) -> Router<AppState> {
 
 fn api_v1_router(config: &AppConfig) -> Router<AppState> {
     Router::new()
+        .merge(provider_market_router(config))
         .route("/health", get(health_check))
         .route("/ready", get(readiness_check))
         .nest("/auth", auth_router(config))
         .route("/auth/me", get(current_user))
-        .route("/venue-connections/polymarket", post(connect_polymarket))
+        .route("/providers", get(list_providers))
+        .route("/providers/{provider}", get(get_provider))
+        .route("/providers/{provider}/connection", post(connect_provider))
+        .route(
+            "/providers/{provider}/markets/favorites",
+            get(list_provider_market_favorites),
+        )
+        .route(
+            "/providers/{provider}/markets/{market_id}/favorite",
+            get(get_provider_market_favorite_status)
+                .put(favorite_provider_market)
+                .delete(unfavorite_provider_market),
+        )
+        .route(
+            "/providers/{provider}/markets/{market_id}/comments",
+            get(list_provider_market_comments).post(create_provider_market_comment),
+        )
+        .route(
+            "/providers/{provider}/markets/{market_id}/comments/stream",
+            get(stream_provider_market_comments),
+        )
         .route("/analytics/overview", get(analytics_overview))
         .route(
             "/automations",
@@ -161,22 +193,6 @@ fn api_v1_router(config: &AppConfig) -> Router<AppState> {
         .route("/automation-alerts/read", patch(mark_alerts_read))
         .route("/automation-alerts/{alert_id}/read", patch(mark_alert_read))
         .route("/automation-alerts/stream", get(stream_alerts))
-        .route("/markets/favorites", get(list_market_favorites))
-        .route(
-            "/markets/{market_id}/favorite",
-            get(get_market_favorite_status)
-                .put(favorite_market)
-                .delete(unfavorite_market),
-        )
-        .route(
-            "/markets/{market_id}/comments",
-            get(list_market_comments).post(create_market_comment),
-        )
-        .route(
-            "/markets/{market_id}/comments/stream",
-            get(stream_market_comments),
-        )
-        .nest("/polymarket", external_proxy_router(config))
         .route("/trades", get(list_trades))
         .route("/trades/preflight", post(create_trade_intent))
         .route("/trades/cancel-multiple", post(cancel_multiple_trades))
@@ -186,7 +202,6 @@ fn api_v1_router(config: &AppConfig) -> Router<AppState> {
         .route("/trades/{trade_id}/submit", post(submit_signed_trade))
         .route("/trades/{trade_id}/reconcile", post(reconcile_trade))
         .route("/trades/{trade_id}/cancel", post(cancel_trade))
-        .route("/trading-providers", get(list_trading_providers))
         .route("/users/settings/email", patch(update_email))
         .route("/users/settings/password", patch(update_password))
         .route("/users/settings/username", patch(update_username))
@@ -317,7 +332,7 @@ mod tests {
             comments::service::MarketCommentService, favorites::service::MarketFavoriteService,
         },
         notifications::service::NotificationService,
-        polymarket::client::PolymarketClient,
+        providers::registry::ProviderRegistry,
         trades::service::TradeService,
         users::service::UserService,
     };
@@ -351,7 +366,7 @@ mod tests {
         let config = test_config();
         let db = DatabaseConnection::default();
         let notification_service = NotificationService::new();
-        let polymarket_client = PolymarketClient::new(&config);
+        let providers = ProviderRegistry::new(&config);
         let state = AppState {
             analytics_service: AnalyticsService::new(db.clone()),
             auth_service: AuthService::new(
@@ -359,16 +374,20 @@ mod tests {
                 config.credential_encryption_key.clone(),
                 config.app_base_url.clone(),
             ),
-            automation_service: AutomationService::new(db.clone(), notification_service.clone()),
+            automation_service: AutomationService::new(
+                db.clone(),
+                notification_service.clone(),
+                providers.clone(),
+            ),
             config: config.clone(),
             db: db.clone(),
             market_comment_service: MarketCommentService::new(db.clone()),
             market_favorite_service: MarketFavoriteService::new(db.clone()),
             notification_service,
-            polymarket_client: polymarket_client.clone(),
+            providers: providers.clone(),
             trade_service: TradeService::new(
                 db.clone(),
-                polymarket_client,
+                providers,
                 config.credential_encryption_key.clone(),
             ),
             user_service: UserService::new(db),
@@ -381,13 +400,31 @@ mod tests {
     async fn market_favorite_and_comment_routes_are_registered_and_protected() {
         let app = test_api_v1_router();
         let routes = [
-            (Method::GET, "/markets/favorites"),
-            (Method::GET, "/markets/market-123/favorite"),
-            (Method::PUT, "/markets/market-123/favorite"),
-            (Method::DELETE, "/markets/market-123/favorite"),
-            (Method::GET, "/markets/market-123/comments"),
-            (Method::POST, "/markets/market-123/comments"),
-            (Method::GET, "/markets/market-123/comments/stream"),
+            (Method::GET, "/providers/polymarket/markets/favorites"),
+            (
+                Method::GET,
+                "/providers/polymarket/markets/market-123/favorite",
+            ),
+            (
+                Method::PUT,
+                "/providers/polymarket/markets/market-123/favorite",
+            ),
+            (
+                Method::DELETE,
+                "/providers/polymarket/markets/market-123/favorite",
+            ),
+            (
+                Method::GET,
+                "/providers/polymarket/markets/market-123/comments",
+            ),
+            (
+                Method::POST,
+                "/providers/polymarket/markets/market-123/comments",
+            ),
+            (
+                Method::GET,
+                "/providers/polymarket/markets/market-123/comments/stream",
+            ),
         ];
 
         for (method, path) in routes {
@@ -408,6 +445,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn canonical_provider_routes_are_registered() {
+        for path in [
+            "/providers",
+            "/providers/polymarket",
+            "/providers/polymarket/markets",
+            "/providers/polymarket/markets/market-1",
+            "/providers/polymarket/markets/market-1/order-book?outcome_id=token-1",
+        ] {
+            let request = Request::builder()
+                .method(Method::POST)
+                .uri(path)
+                .body(Body::empty())
+                .unwrap();
+            let response = test_api_v1_router().oneshot(request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED, "{path}");
+        }
+    }
+
+    #[tokio::test]
+    async fn canonical_connection_route_is_protected() {
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri("/providers/polymarket/connection")
+            .header(CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                r#"{"api_key":"key","secret":"secret","passphrase":"passphrase"}"#,
+            ))
+            .unwrap();
+        let response = test_api_v1_router().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn compatibility_market_connection_comment_and_favorite_routes_are_absent() {
+        for path in [
+            "/polymarket/markets",
+            "/polymarket/markets/market-1",
+            "/polymarket/order-books/token-1",
+            "/polymarket/venue-chain",
+            "/venue-connections/polymarket",
+            "/providers/polymarket/venue-connection",
+            "/providers/polymarket/venue-chain",
+            "/providers/polymarket/order-books/token-1",
+            "/markets/favorites",
+            "/markets/market-1/favorite",
+            "/markets/market-1/comments",
+            "/markets/market-1/comments/stream",
+            "/trading-providers",
+        ] {
+            let request = Request::builder()
+                .method(Method::GET)
+                .uri(path)
+                .body(Body::empty())
+                .unwrap();
+            let response = test_api_v1_router().oneshot(request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
+        }
+    }
+
+    #[tokio::test]
     async fn username_settings_route_is_registered_and_protected() {
         let request = Request::builder()
             .method(Method::PATCH)
@@ -418,6 +515,15 @@ mod tests {
         let response = test_api_v1_router().oneshot(request).await.unwrap();
 
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[test]
+    fn stale_top_level_provider_paths_are_absent() {
+        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        assert!(!manifest.join("src/polymarket").exists());
+        assert!(!manifest.join("src/venue.rs").exists());
+        assert!(!manifest.join("src/domain").exists());
+        assert!(manifest.join("src/providers/polymarket").exists());
     }
 
     #[test]

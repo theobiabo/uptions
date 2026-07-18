@@ -19,6 +19,7 @@ use crate::{
             MarketCommentStreamEvent, MarketCommentsPageResponse, MarketCommentsQuery,
         },
     },
+    providers::types::ProviderId,
 };
 
 const DEFAULT_PAGE_SIZE: u64 = 50;
@@ -27,6 +28,7 @@ const MAX_BODY_LENGTH: usize = 2000;
 
 #[derive(Clone, Debug)]
 pub(crate) struct PublishedMarketComment {
+    pub provider: ProviderId,
     pub market_id: String,
     pub event: MarketCommentStreamEvent,
 }
@@ -45,16 +47,19 @@ impl MarketCommentService {
 
     pub async fn list(
         &self,
+        provider: ProviderId,
         market_id: &str,
         query: MarketCommentsQuery,
     ) -> Result<MarketCommentsPageResponse, AppError> {
         let market_id = clean_market_id(market_id)?;
         let limit = page_size(query.limit)?;
-        let mut comments_query =
-            market_comment::Entity::find().filter(market_comment::Column::MarketId.eq(&market_id));
+        let mut comments_query = market_comment::Entity::find()
+            .filter(market_comment::Column::Provider.eq(provider.storage_value()))
+            .filter(market_comment::Column::MarketId.eq(&market_id));
 
         if let Some(before) = clean_cursor(query.before.as_deref())? {
             let cursor = market_comment::Entity::find_by_id(&before)
+                .filter(market_comment::Column::Provider.eq(provider.storage_value()))
                 .filter(market_comment::Column::MarketId.eq(&market_id))
                 .one(&self.db)
                 .await?
@@ -95,6 +100,7 @@ impl MarketCommentService {
 
     pub async fn create(
         &self,
+        provider: ProviderId,
         market_id: &str,
         author_id: &str,
         payload: CreateMarketCommentRequest,
@@ -108,6 +114,7 @@ impl MarketCommentService {
         let now = Utc::now();
         let model = market_comment::ActiveModel {
             id: Set(Uuid::new_v4().to_string()),
+            provider: Set(provider.storage_value().to_owned()),
             market_id: Set(market_id.clone()),
             author_id: Set(author_id.to_owned()),
             body: Set(body),
@@ -127,6 +134,7 @@ impl MarketCommentService {
             )]),
         )?;
         let _ = self.sender.send(PublishedMarketComment {
+            provider,
             market_id,
             event: MarketCommentStreamEvent {
                 event_type: "market_comment.created".to_owned(),
@@ -139,9 +147,21 @@ impl MarketCommentService {
 
     pub(crate) fn subscribe(
         &self,
+        provider: ProviderId,
         market_id: &str,
-    ) -> Result<(String, broadcast::Receiver<PublishedMarketComment>), AppError> {
-        Ok((clean_market_id(market_id)?, self.sender.subscribe()))
+    ) -> Result<
+        (
+            ProviderId,
+            String,
+            broadcast::Receiver<PublishedMarketComment>,
+        ),
+        AppError,
+    > {
+        Ok((
+            provider,
+            clean_market_id(market_id)?,
+            self.sender.subscribe(),
+        ))
     }
 
     async fn authors_for(
@@ -185,6 +205,9 @@ fn comment_response(
 
     Ok(MarketCommentResponse {
         id: model.id,
+        provider: ProviderId::from_storage(&model.provider).ok_or_else(|| {
+            AppError::DatabaseError("persisted market comment provider is invalid".to_owned())
+        })?,
         market_id: model.market_id,
         author,
         body: model.body,

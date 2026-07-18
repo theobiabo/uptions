@@ -14,9 +14,10 @@ use crate::{
         service::AutomationService,
     },
     db::Db,
-    entities::{automation, automation_observation, automation_run},
+    entities::{automation, automation_observation, automation_run, user},
     error::AppError,
-    polymarket::client::PolymarketClient,
+    markets::types::MarketResponse,
+    providers::{registry::ProviderRegistry, types::ProviderId},
 };
 
 const AUTOMATION_INTERVAL_SECONDS: u64 = 30;
@@ -26,7 +27,7 @@ const AUTOMATION_COOLDOWN_SECONDS: i64 = 300;
 pub struct AutomationExecutor {
     automation_service: AutomationService,
     db: Db,
-    polymarket_client: PolymarketClient,
+    providers: ProviderRegistry,
 }
 
 struct TriggerEvaluation {
@@ -35,15 +36,11 @@ struct TriggerEvaluation {
 }
 
 impl AutomationExecutor {
-    pub fn new(
-        db: Db,
-        automation_service: AutomationService,
-        polymarket_client: PolymarketClient,
-    ) -> Self {
+    pub fn new(db: Db, automation_service: AutomationService, providers: ProviderRegistry) -> Self {
         Self {
             automation_service,
             db,
-            polymarket_client,
+            providers,
         }
     }
 
@@ -79,13 +76,14 @@ impl AutomationExecutor {
     }
 
     async fn evaluate_automation(&self, automation: automation::Model) -> Result<(), AppError> {
+        let provider = self.ensure_runtime_provider_alignment(&automation).await?;
         let workflow = serde_json::from_value::<WorkflowPayload>(automation.workflow.clone())
             .map_err(|error| AppError::BadRequest(error.to_string()))?;
         let ordered_steps = ordered_workflow_steps(&workflow)?;
         let trigger = ordered_steps
             .first()
             .ok_or_else(|| AppError::BadRequest("workflow trigger is missing".to_owned()))?;
-        let market = self.fetch_market(&automation).await?;
+        let market = self.fetch_market(provider, &automation).await?;
         let trigger_evaluation = self
             .evaluate_trigger(&automation.id, trigger, &market)
             .await?;
@@ -179,7 +177,7 @@ impl AutomationExecutor {
         &self,
         automation_id: &str,
         step: &WorkflowStepPayload,
-        market: &Value,
+        market: &MarketResponse,
     ) -> Result<TriggerEvaluation, AppError> {
         let previous =
             automation_observation::Entity::find_by_id((automation_id.to_owned(), step.id.clone()))
@@ -195,7 +193,7 @@ impl AutomationExecutor {
                     .and_then(Value::as_str)
                     .unwrap_or("YES");
                 let current = market_price(Some(market), outcome).ok_or_else(|| {
-                    AppError::ExternalApiError("Polymarket market price is unavailable".to_owned())
+                    AppError::ExternalApiError("provider market price is unavailable".to_owned())
                 })?;
                 let previous_value = previous.as_ref().and_then(|value| value.value);
                 let matched =
@@ -215,12 +213,9 @@ impl AutomationExecutor {
                 })
             }
             WorkflowActionType::TriggerVolumeMoves => {
-                let current =
-                    number_from_keys(market, &["volumeNum", "volume"]).ok_or_else(|| {
-                        AppError::ExternalApiError(
-                            "Polymarket market volume is unavailable".to_owned(),
-                        )
-                    })?;
+                let current = market.volume.ok_or_else(|| {
+                    AppError::ExternalApiError("provider market volume is unavailable".to_owned())
+                })?;
                 let previous_value = previous.as_ref().and_then(|value| value.value);
                 let change_percent = previous_value.and_then(|value| {
                     (value.abs() > f64::EPSILON)
@@ -320,7 +315,7 @@ impl AutomationExecutor {
         automation: &automation::Model,
         run_id: &str,
         action: &WorkflowStepPayload,
-        market: Option<&Value>,
+        market: Option<&MarketResponse>,
     ) -> Result<Value, AppError> {
         match action.action {
             WorkflowActionType::SendMessage => {
@@ -373,7 +368,7 @@ impl AutomationExecutor {
         automation: &automation::Model,
         run_id: &str,
         action: &WorkflowStepPayload,
-        market: Option<&Value>,
+        market: Option<&MarketResponse>,
     ) -> Result<Value, AppError> {
         let side = match action.action {
             WorkflowActionType::Buy => "BUY",
@@ -449,13 +444,67 @@ impl AutomationExecutor {
         }))
     }
 
-    async fn fetch_market(&self, automation: &automation::Model) -> Result<Value, AppError> {
+    async fn fetch_market(
+        &self,
+        provider: ProviderId,
+        automation: &automation::Model,
+    ) -> Result<MarketResponse, AppError> {
         let market_id = automation
             .market_id
             .as_deref()
             .ok_or_else(|| AppError::BadRequest("automation market id is missing".to_owned()))?;
+        let resolved = self.providers.resolve_market(provider, market_id).await?;
+        if automation.chain != resolved.chain.storage_value()
+            || automation.chain_id != resolved.chain.id().value() as i64
+        {
+            return Err(AppError::ProviderValidation {
+                code: "AUTOMATION_CHAIN_MISMATCH",
+                message: "automation chain does not match the provider market".to_owned(),
+            });
+        }
+        Ok(resolved.market)
+    }
 
-        self.polymarket_client.fetch_market(market_id).await
+    async fn ensure_runtime_provider_alignment(
+        &self,
+        automation: &automation::Model,
+    ) -> Result<ProviderId, AppError> {
+        let provider = ProviderId::from_storage(&automation.provider).ok_or_else(|| {
+            AppError::BadRequest("stored automation provider is invalid".to_owned())
+        })?;
+        let user = user::Entity::find_by_id(&automation.user_id)
+            .one(&self.db)
+            .await?
+            .ok_or_else(|| AppError::NotFound("automation user not found".to_owned()))?;
+        let selected = ProviderId::from_storage(&user.preferred_trading_provider);
+        if selected != Some(provider) {
+            let now = Utc::now();
+            let mut active = automation.clone().into_active_model();
+            active.status = Set("paused".to_owned());
+            active.last_run_status = Set(Some("action_required_provider_changed".to_owned()));
+            active.updated_at = Set(now.into());
+            active.update(&self.db).await?;
+            self.automation_service
+                .create_alert(
+                    &automation.user_id,
+                    Some(automation.id.clone()),
+                    "Automation paused",
+                    "This automation uses a different provider than your selected provider. Review it before resuming.",
+                    "warning",
+                    json!({
+                        "type": "automation_provider_action_required",
+                        "automation_id": automation.id,
+                        "automation_provider": provider,
+                        "selected_provider": selected
+                    }),
+                )
+                .await?;
+            return Err(AppError::Conflict(
+                "automation paused because its provider no longer matches the selected provider"
+                    .to_owned(),
+            ));
+        }
+        Ok(provider)
     }
 
     async fn is_in_cooldown(&self, automation_id: &str) -> Result<bool, AppError> {
@@ -603,7 +652,7 @@ fn ordered_workflow_steps(
     Ok(ordered)
 }
 
-fn condition_matches(step: &WorkflowStepPayload, market: Option<&Value>) -> bool {
+fn condition_matches(step: &WorkflowStepPayload, market: Option<&MarketResponse>) -> bool {
     match step.action {
         WorkflowActionType::ConditionOutcomePriceAbove => {
             compare_price(step, market, |current, target| current > target)
@@ -612,7 +661,7 @@ fn condition_matches(step: &WorkflowStepPayload, market: Option<&Value>) -> bool
             compare_price(step, market, |current, target| current < target)
         }
         WorkflowActionType::ConditionVolumeAbove => market
-            .and_then(|value| number_from_keys(value, &["volumeNum", "volume"]))
+            .and_then(|market| market.volume)
             .zip(number_param(&step.params, "volume"))
             .is_some_and(|(current, target)| current > target),
         _ => false,
@@ -621,7 +670,7 @@ fn condition_matches(step: &WorkflowStepPayload, market: Option<&Value>) -> bool
 
 fn compare_price(
     step: &WorkflowStepPayload,
-    market: Option<&Value>,
+    market: Option<&MarketResponse>,
     predicate: impl Fn(f64, f64) -> bool,
 ) -> bool {
     let outcome = step
@@ -634,26 +683,21 @@ fn compare_price(
         .is_some_and(|(current, target)| predicate(current, target))
 }
 
-fn market_token_id(market: Option<&Value>, outcome: &str) -> Option<String> {
-    let market = market?;
-    let outcomes = string_array(market.get("outcomes"));
-    let token_ids = string_array(market.get("clobTokenIds"));
-    let index = outcomes
+fn market_token_id(market: Option<&MarketResponse>, outcome: &str) -> Option<String> {
+    market?
+        .outcomes
         .iter()
-        .position(|value| value.eq_ignore_ascii_case(outcome))?;
-
-    token_ids.get(index).cloned()
+        .find(|candidate| candidate.label.eq_ignore_ascii_case(outcome))?
+        .id
+        .clone()
 }
 
-fn market_price(market: Option<&Value>, outcome: &str) -> Option<f64> {
-    let market = market?;
-    let outcomes = string_array(market.get("outcomes"));
-    let prices = number_array(market.get("outcomePrices"));
-    let index = outcomes
+fn market_price(market: Option<&MarketResponse>, outcome: &str) -> Option<f64> {
+    market?
+        .outcomes
         .iter()
-        .position(|value| value.eq_ignore_ascii_case(outcome))?;
-
-    prices.get(index).copied()
+        .find(|candidate| candidate.label.eq_ignore_ascii_case(outcome))?
+        .price
 }
 
 fn schedule_seconds(value: &str) -> Option<i64> {
@@ -669,34 +713,8 @@ fn schedule_seconds(value: &str) -> Option<i64> {
     }
 }
 
-fn string_array(value: Option<&Value>) -> Vec<String> {
-    match value {
-        Some(Value::Array(items)) => items
-            .iter()
-            .filter_map(Value::as_str)
-            .map(str::to_owned)
-            .collect(),
-        Some(Value::String(text)) => serde_json::from_str::<Vec<String>>(text).unwrap_or_default(),
-        _ => Vec::new(),
-    }
-}
-
-fn number_array(value: Option<&Value>) -> Vec<f64> {
-    match value {
-        Some(Value::Array(items)) => items.iter().filter_map(number_value).collect(),
-        Some(Value::String(text)) => serde_json::from_str::<Vec<Value>>(text)
-            .map(|items| items.iter().filter_map(number_value).collect())
-            .unwrap_or_default(),
-        _ => Vec::new(),
-    }
-}
-
 fn number_param(value: &Value, key: &str) -> Option<f64> {
     number_value(value.get(key)?)
-}
-
-fn number_from_keys(value: &Value, keys: &[&str]) -> Option<f64> {
-    keys.iter().find_map(|key| number_value(value.get(*key)?))
 }
 
 fn number_value(value: &Value) -> Option<f64> {
