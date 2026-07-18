@@ -62,10 +62,14 @@ pub enum TradeIntentStatus {
     Submitting,
     ReconciliationRequired,
     Submitted,
+    Matched,
+    Mined,
+    Retrying,
     Filled,
     PartiallyFilled,
     Rejected,
     Failed,
+    CancellationRequested,
     Cancelled,
 }
 
@@ -76,10 +80,14 @@ impl TradeIntentStatus {
             Self::Submitting => "submitting",
             Self::ReconciliationRequired => "reconciliation_required",
             Self::Submitted => "submitted",
+            Self::Matched => "matched",
+            Self::Mined => "mined",
+            Self::Retrying => "retrying",
             Self::Filled => "filled",
             Self::PartiallyFilled => "partially_filled",
             Self::Rejected => "rejected",
             Self::Failed => "failed",
+            Self::CancellationRequested => "cancellation_requested",
             Self::Cancelled => "cancelled",
         }
     }
@@ -144,9 +152,16 @@ pub struct TradeIntentResponse {
     pub reconciliation_checked_at: Option<String>,
     pub side: String,
     pub signed_order_hash: Option<String>,
+    pub signed_maker_amount_base: Option<String>,
+    pub signed_taker_amount_base: Option<String>,
+    pub normalized_amount_base: Option<String>,
+    pub normalized_price_numerator: Option<String>,
+    pub normalized_price_denominator: Option<String>,
     pub status: String,
     pub submission_started_at: Option<String>,
     pub submitted_at: Option<String>,
+    pub cancellation_requested_at: Option<String>,
+    pub cancelled_at: Option<String>,
     pub token_id: String,
     pub updated_at: String,
     pub wallet_address: String,
@@ -170,4 +185,23 @@ pub struct ReconcileTradeResponse {
     pub provider_lookup_available: bool,
     pub resolution: String,
     pub trade: TradeIntentResponse,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct CancelMultipleTradesRequest {
+    #[schema(min_items = 1, max_items = 1000)]
+    pub trade_ids: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct CancelMarketTradesRequest {
+    pub market_id: String,
+    pub token_id: String,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct CancelTradesResponse {
+    #[schema(value_type = Object)]
+    pub provider_response: Value,
+    pub trades: Vec<TradeIntentResponse>,
 }

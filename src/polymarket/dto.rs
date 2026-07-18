@@ -44,9 +44,72 @@ pub struct OrderBookResponse {
     pub updated_at: String,
 }
 
+#[derive(Clone, Debug, Deserialize)]
+#[serde(tag = "event_type", rename_all = "lowercase")]
+pub enum PolymarketUserEvent {
+    Order(PolymarketOrderEvent),
+    Trade(PolymarketTradeEvent),
+}
+
+impl PolymarketUserEvent {
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::Order(_) => "order",
+            Self::Trade(_) => "trade",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct PolymarketOrderEvent {
+    pub id: String,
+    #[serde(rename = "type")]
+    pub update_type: String,
+    pub status: Option<String>,
+    pub owner: Option<String>,
+    pub market: Option<String>,
+    pub asset_id: Option<String>,
+    pub side: Option<String>,
+    pub original_size: Option<String>,
+    pub size_matched: Option<String>,
+    pub price: Option<String>,
+    pub timestamp: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct PolymarketTradeMakerOrder {
+    pub order_id: String,
+    pub owner: Option<String>,
+    pub maker_address: Option<String>,
+    pub matched_amount: Option<String>,
+    pub price: Option<String>,
+    pub asset_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct PolymarketTradeEvent {
+    pub id: String,
+    #[serde(rename = "type")]
+    pub update_type: String,
+    pub taker_order_id: Option<String>,
+    pub status: Option<String>,
+    pub owner: Option<String>,
+    pub market: Option<String>,
+    pub asset_id: Option<String>,
+    pub side: Option<String>,
+    pub size: Option<String>,
+    pub price: Option<String>,
+    pub last_update: Option<String>,
+    pub timestamp: Option<String>,
+    #[serde(default)]
+    pub maker_orders: Vec<PolymarketTradeMakerOrder>,
+}
+
 #[derive(Clone, Debug)]
 pub struct PolymarketApiCredentials {
     pub address: String,
+    pub funder: String,
+    pub signature_type: i32,
     pub api_key: String,
     pub secret: String,
     pub passphrase: String,

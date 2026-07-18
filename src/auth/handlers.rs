@@ -10,8 +10,8 @@ use crate::{
         AuthSessionResponse, AuthUserResponse, ConnectPolymarketRequest, CreateChallengeRequest,
         CreateChallengeResponse, ForgotPasswordRequest, LoginRequest, LogoutResponse,
         ResetPasswordRequest, SettingsUpdateResponse, SignupRequest, UpdateEmailRequest,
-        UpdatePasswordRequest, VenueConnectionResponse, VerifyChallengeRequest,
-        VerifyChallengeResponse, VerifyEmailRequest,
+        UpdatePasswordRequest, UpdateUsernameRequest, VenueConnectionResponse,
+        VerifyChallengeRequest, VerifyChallengeResponse, VerifyEmailRequest,
     },
     error::{AppError, ErrorResponse},
     response::{ApiResponse, ok},
@@ -280,6 +280,33 @@ pub async fn update_password(
         .await?;
 
     Ok(ok("Password updated successfully", response))
+}
+
+#[utoipa::path(
+    patch,
+    path = "/api/v1/users/settings/username",
+    tag = "Settings",
+    security(("bearer_auth" = [])),
+    request_body = UpdateUsernameRequest,
+    responses(
+        (status = 200, description = "Username created or updated", body = ApiResponse<AuthUserResponse>),
+        (status = 400, description = "Invalid username", body = ErrorResponse),
+        (status = 401, description = "Missing or invalid bearer token", body = ErrorResponse),
+        (status = 409, description = "Username already registered", body = ErrorResponse)
+    )
+)]
+pub async fn update_username(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<UpdateUsernameRequest>,
+) -> Result<Json<ApiResponse<AuthUserResponse>>, AppError> {
+    let access_token = bearer_token(&headers)?;
+    let user = state
+        .auth_service
+        .update_username(&access_token, payload)
+        .await?;
+
+    Ok(ok("Username saved successfully", user))
 }
 
 #[utoipa::path(

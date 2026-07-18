@@ -5,6 +5,7 @@ use reqwest::Url;
 const DEFAULT_PRODUCTION_ORIGIN: &str = "https://www.uptions.xyz";
 const POLYMARKET_CLOB_HOST: &str = "clob.polymarket.com";
 const POLYMARKET_GAMMA_HOST: &str = "gamma-api.polymarket.com";
+const POLYMARKET_USER_WS_HOST: &str = "ws-subscriptions-clob.polymarket.com";
 
 #[derive(Clone, Debug)]
 pub struct AppConfig {
@@ -14,6 +15,7 @@ pub struct AppConfig {
     pub app_base_url: String,
     pub polymarket_clob_host: String,
     pub polymarket_gamma_host: String,
+    pub polymarket_user_ws_url: String,
     pub environment: String,
     pub swagger_enabled: bool,
     pub cors_allowed_origins: Vec<String>,
@@ -32,6 +34,8 @@ impl AppConfig {
             .unwrap_or_else(|_| format!("https://{POLYMARKET_CLOB_HOST}"));
         let polymarket_gamma_host = env::var("POLYMARKET_GAMMA_HOST")
             .unwrap_or_else(|_| format!("https://{POLYMARKET_GAMMA_HOST}"));
+        let polymarket_user_ws_url = env::var("POLYMARKET_USER_WS_URL")
+            .unwrap_or_else(|_| format!("wss://{POLYMARKET_USER_WS_HOST}/ws/user"));
 
         if production {
             validate_polymarket_host(
@@ -44,6 +48,7 @@ impl AppConfig {
                 &polymarket_gamma_host,
                 POLYMARKET_GAMMA_HOST,
             );
+            validate_polymarket_user_ws_url(&polymarket_user_ws_url);
         }
 
         let cors_allowed_origins = env::var("CORS_ALLOWED_ORIGINS")
@@ -64,6 +69,7 @@ impl AppConfig {
                 .unwrap_or_else(|_| "http://localhost:5173".to_owned()),
             polymarket_clob_host: polymarket_clob_host.trim_end_matches('/').to_owned(),
             polymarket_gamma_host: polymarket_gamma_host.trim_end_matches('/').to_owned(),
+            polymarket_user_ws_url,
             swagger_enabled: env_bool("SWAGGER_ENABLED", !production),
             cors_allowed_origins,
             request_body_limit_bytes: env_number("REQUEST_BODY_LIMIT_BYTES", 1_048_576),
@@ -107,6 +113,24 @@ where
         }
         Err(_) => default,
     }
+}
+
+fn validate_polymarket_user_ws_url(value: &str) {
+    let url = Url::parse(value)
+        .unwrap_or_else(|_| panic!("POLYMARKET_USER_WS_URL must be a valid WSS URL"));
+    let valid = url.scheme() == "wss"
+        && url.host_str() == Some(POLYMARKET_USER_WS_HOST)
+        && url.port_or_known_default() == Some(443)
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.path() == "/ws/user"
+        && url.query().is_none()
+        && url.fragment().is_none();
+
+    assert!(
+        valid,
+        "POLYMARKET_USER_WS_URL must use wss://{POLYMARKET_USER_WS_HOST}/ws/user"
+    );
 }
 
 fn validate_polymarket_host(name: &str, value: &str, allowed_host: &str) {

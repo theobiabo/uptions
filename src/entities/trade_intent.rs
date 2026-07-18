@@ -34,6 +34,13 @@ pub struct Model {
     pub submitted_at: Option<DateTimeWithTimeZone>,
     pub submission_started_at: Option<DateTimeWithTimeZone>,
     pub reconciliation_checked_at: Option<DateTimeWithTimeZone>,
+    pub signed_maker_amount_base: Option<String>,
+    pub signed_taker_amount_base: Option<String>,
+    pub normalized_amount_base: Option<String>,
+    pub normalized_price_numerator: Option<String>,
+    pub normalized_price_denominator: Option<String>,
+    pub cancellation_requested_at: Option<DateTimeWithTimeZone>,
+    pub cancelled_at: Option<DateTimeWithTimeZone>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

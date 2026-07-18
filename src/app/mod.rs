@@ -31,8 +31,8 @@ use crate::{
     app::{docs::swagger_ui, rate_limit::RateLimiter, state::AppState},
     auth::handlers::{
         connect_polymarket, create_challenge, current_user, forgot_password, login, logout,
-        logout_all, reset_password, signup, update_email, update_password, verify_challenge,
-        verify_email,
+        logout_all, reset_password, signup, update_email, update_password, update_username,
+        verify_challenge, verify_email,
     },
     automations::handlers::{
         clear_alerts, delete_automation, list_alerts, list_automations, mark_alert_read,
@@ -41,6 +41,12 @@ use crate::{
     },
     config::AppConfig,
     error::ErrorResponse,
+    markets::{
+        comments::handlers::{create_market_comment, list_market_comments, stream_market_comments},
+        favorites::handlers::{
+            favorite_market, get_market_favorite_status, list_market_favorites, unfavorite_market,
+        },
+    },
     mcp::handlers::{
         approve_mcp_approval, get_mcp_approval, handle_mcp, list_mcp_approvals, reject_mcp_approval,
     },
@@ -48,6 +54,7 @@ use crate::{
     polymarket::handlers::{fetch_market, fetch_markets, fetch_order_book, fetch_venue_chain},
     response::{ApiResponse, ok},
     trades::handlers::{
+        cancel_all_trades, cancel_market_trades, cancel_multiple_trades, cancel_trade,
         create_trade_intent, get_trade, list_trades, reconcile_trade, submit_signed_trade,
     },
     users::handler::{
@@ -154,15 +161,35 @@ fn api_v1_router(config: &AppConfig) -> Router<AppState> {
         .route("/automation-alerts/read", patch(mark_alerts_read))
         .route("/automation-alerts/{alert_id}/read", patch(mark_alert_read))
         .route("/automation-alerts/stream", get(stream_alerts))
+        .route("/markets/favorites", get(list_market_favorites))
+        .route(
+            "/markets/{market_id}/favorite",
+            get(get_market_favorite_status)
+                .put(favorite_market)
+                .delete(unfavorite_market),
+        )
+        .route(
+            "/markets/{market_id}/comments",
+            get(list_market_comments).post(create_market_comment),
+        )
+        .route(
+            "/markets/{market_id}/comments/stream",
+            get(stream_market_comments),
+        )
         .nest("/polymarket", external_proxy_router(config))
         .route("/trades", get(list_trades))
         .route("/trades/preflight", post(create_trade_intent))
+        .route("/trades/cancel-multiple", post(cancel_multiple_trades))
+        .route("/trades/cancel-all", post(cancel_all_trades))
+        .route("/trades/cancel-market", post(cancel_market_trades))
         .route("/trades/{trade_id}", get(get_trade))
         .route("/trades/{trade_id}/submit", post(submit_signed_trade))
         .route("/trades/{trade_id}/reconcile", post(reconcile_trade))
+        .route("/trades/{trade_id}/cancel", post(cancel_trade))
         .route("/trading-providers", get(list_trading_providers))
         .route("/users/settings/email", patch(update_email))
         .route("/users/settings/password", patch(update_password))
+        .route("/users/settings/username", patch(update_username))
         .route("/users/trading-provider", patch(update_trading_provider))
         .route("/users/wallet/challenge", post(create_wallet_challenge))
         .route("/users/wallet", patch(update_wallet))
@@ -271,11 +298,126 @@ pub fn create_app(state: AppState) -> Router {
 
 #[cfg(test)]
 mod tests {
-    use super::is_allowed_origin;
-    use axum::http::HeaderValue;
+    use super::{api_v1_router, is_allowed_origin};
+    use axum::{
+        Router,
+        body::Body,
+        http::{HeaderValue, Method, Request, StatusCode, header::CONTENT_TYPE},
+    };
+    use sea_orm::DatabaseConnection;
+    use tower::ServiceExt;
+
+    use crate::{
+        analytics::service::AnalyticsService,
+        app::state::AppState,
+        auth::service::AuthService,
+        automations::service::AutomationService,
+        config::AppConfig,
+        markets::{
+            comments::service::MarketCommentService, favorites::service::MarketFavoriteService,
+        },
+        notifications::service::NotificationService,
+        polymarket::client::PolymarketClient,
+        trades::service::TradeService,
+        users::service::UserService,
+    };
 
     fn origins() -> Vec<String> {
         vec!["https://www.uptions.xyz".to_owned()]
+    }
+
+    fn test_config() -> AppConfig {
+        AppConfig {
+            server_address: "127.0.0.1:0".to_owned(),
+            database_url: "postgres://unused".to_owned(),
+            credential_encryption_key:
+                "0000000000000000000000000000000000000000000000000000000000000000".to_owned(),
+            app_base_url: "http://localhost:5173".to_owned(),
+            polymarket_clob_host: "https://clob.polymarket.com".to_owned(),
+            polymarket_gamma_host: "https://gamma-api.polymarket.com".to_owned(),
+            polymarket_user_ws_url: "wss://ws-subscriptions-clob.polymarket.com/ws/user".to_owned(),
+            environment: "test".to_owned(),
+            swagger_enabled: false,
+            cors_allowed_origins: origins(),
+            request_body_limit_bytes: 1_048_576,
+            concurrency_limit: 256,
+            public_rate_limit_per_minute: 120,
+            auth_rate_limit_per_minute: 10,
+            external_rate_limit_per_minute: 60,
+        }
+    }
+
+    fn test_api_v1_router() -> Router {
+        let config = test_config();
+        let db = DatabaseConnection::default();
+        let notification_service = NotificationService::new();
+        let polymarket_client = PolymarketClient::new(&config);
+        let state = AppState {
+            analytics_service: AnalyticsService::new(db.clone()),
+            auth_service: AuthService::new(
+                db.clone(),
+                config.credential_encryption_key.clone(),
+                config.app_base_url.clone(),
+            ),
+            automation_service: AutomationService::new(db.clone(), notification_service.clone()),
+            config: config.clone(),
+            db: db.clone(),
+            market_comment_service: MarketCommentService::new(db.clone()),
+            market_favorite_service: MarketFavoriteService::new(db.clone()),
+            notification_service,
+            polymarket_client: polymarket_client.clone(),
+            trade_service: TradeService::new(
+                db.clone(),
+                polymarket_client,
+                config.credential_encryption_key.clone(),
+            ),
+            user_service: UserService::new(db),
+        };
+
+        api_v1_router(&config).with_state(state)
+    }
+
+    #[tokio::test]
+    async fn market_favorite_and_comment_routes_are_registered_and_protected() {
+        let app = test_api_v1_router();
+        let routes = [
+            (Method::GET, "/markets/favorites"),
+            (Method::GET, "/markets/market-123/favorite"),
+            (Method::PUT, "/markets/market-123/favorite"),
+            (Method::DELETE, "/markets/market-123/favorite"),
+            (Method::GET, "/markets/market-123/comments"),
+            (Method::POST, "/markets/market-123/comments"),
+            (Method::GET, "/markets/market-123/comments/stream"),
+        ];
+
+        for (method, path) in routes {
+            let request = Request::builder()
+                .method(method.clone())
+                .uri(path)
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"body":"test comment"}"#))
+                .unwrap();
+            let response = app.clone().oneshot(request).await.unwrap();
+
+            assert_eq!(
+                response.status(),
+                StatusCode::UNAUTHORIZED,
+                "{method} {path} should be registered and require authentication"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn username_settings_route_is_registered_and_protected() {
+        let request = Request::builder()
+            .method(Method::PATCH)
+            .uri("/users/settings/username")
+            .header(CONTENT_TYPE, "application/json")
+            .body(Body::from(r#"{"username":"alice_123"}"#))
+            .unwrap();
+        let response = test_api_v1_router().oneshot(request).await.unwrap();
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[test]

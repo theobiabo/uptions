@@ -13,9 +13,9 @@ use crate::{
         AuthSessionResponse, AuthUserResponse, ConnectPolymarketRequest, CreateChallengeRequest,
         CreateChallengeResponse, ForgotPasswordRequest, LoginRequest, LogoutResponse,
         ResetPasswordRequest, SettingsUpdateResponse, SignupRequest, UpdateEmailRequest,
-        UpdatePasswordRequest, VenueConnectionResponse, VerifyChallengeRequest,
-        VerifyChallengeResponse, VerifyEmailRequest, WalletChallengeRequest,
-        WalletChallengeResponse,
+        UpdatePasswordRequest, UpdateUsernameRequest, VenueConnectionResponse,
+        VerifyChallengeRequest, VerifyChallengeResponse, VerifyEmailRequest,
+        WalletChallengeRequest, WalletChallengeResponse,
     },
     automations::dto::{
         AutomationAlertResponse, AutomationMarketPayload, AutomationProvider, AutomationResponse,
@@ -25,6 +25,15 @@ use crate::{
         WorkflowPayload, WorkflowStepPayload,
     },
     error::ErrorResponse,
+    markets::{
+        comments::dto::{
+            CreateMarketCommentRequest, MarketCommentAuthorResponse, MarketCommentResponse,
+            MarketCommentStreamEvent, MarketCommentsPageResponse, MarketCommentsQuery,
+        },
+        favorites::dto::{
+            MarketFavoriteStatusResponse, MarketFavoritesPageResponse, MarketFavoritesQuery,
+        },
+    },
     mcp::dto::{
         McpApprovalDecisionResponse, McpApprovalResponse, McpJsonRpcRequest, McpJsonRpcResponse,
     },
@@ -35,6 +44,7 @@ use crate::{
     },
     response::ApiResponse,
     trades::dto::{
+        CancelMarketTradesRequest, CancelMultipleTradesRequest, CancelTradesResponse,
         CreateTradeIntentRequest, CreateTradeIntentResponse, PolymarketExecutionType,
         ReconcileTradeResponse, SubmitSignedTradeRequest, SubmitSignedTradeResponse,
         TradeIntentResponse, TradeOrderType, TradeSide,
@@ -64,6 +74,7 @@ use crate::{
         crate::auth::handlers::current_user,
         crate::auth::handlers::update_email,
         crate::auth::handlers::update_password,
+        crate::auth::handlers::update_username,
         crate::auth::handlers::connect_polymarket,
         crate::automations::handlers::list_automations,
         crate::automations::handlers::publish_automation,
@@ -75,6 +86,13 @@ use crate::{
         crate::automations::handlers::clear_alerts,
         crate::automations::handlers::mark_alerts_read,
         crate::automations::handlers::mark_alert_read,
+        crate::markets::comments::handlers::list_market_comments,
+        crate::markets::comments::handlers::create_market_comment,
+        crate::markets::comments::handlers::stream_market_comments,
+        crate::markets::favorites::handlers::favorite_market,
+        crate::markets::favorites::handlers::unfavorite_market,
+        crate::markets::favorites::handlers::get_market_favorite_status,
+        crate::markets::favorites::handlers::list_market_favorites,
         crate::mcp::handlers::handle_mcp,
         crate::mcp::handlers::list_mcp_approvals,
         crate::mcp::handlers::get_mcp_approval,
@@ -90,6 +108,10 @@ use crate::{
         crate::trades::handlers::create_trade_intent,
         crate::trades::handlers::submit_signed_trade,
         crate::trades::handlers::reconcile_trade,
+        crate::trades::handlers::cancel_trade,
+        crate::trades::handlers::cancel_multiple_trades,
+        crate::trades::handlers::cancel_all_trades,
+        crate::trades::handlers::cancel_market_trades,
         crate::users::handler::list_trading_providers,
         crate::users::handler::update_trading_provider,
         crate::users::handler::create_wallet_challenge,
@@ -144,6 +166,7 @@ use crate::{
             ApiResponse<CreateTradeIntentResponse>,
             ApiResponse<SubmitSignedTradeResponse>,
             ApiResponse<ReconcileTradeResponse>,
+            ApiResponse<CancelTradesResponse>,
             ConnectPolymarketRequest,
             CreateChallengeRequest,
             CreateChallengeResponse,
@@ -154,6 +177,19 @@ use crate::{
             MarketsQuery,
             MarkAlertsReadResponse,
             ClearAlertsResponse,
+            MarketCommentAuthorResponse,
+            MarketCommentResponse,
+            MarketCommentStreamEvent,
+            MarketCommentsPageResponse,
+            MarketCommentsQuery,
+            CreateMarketCommentRequest,
+            ApiResponse<MarketCommentResponse>,
+            ApiResponse<MarketCommentsPageResponse>,
+            MarketFavoriteStatusResponse,
+            MarketFavoritesPageResponse,
+            MarketFavoritesQuery,
+            ApiResponse<MarketFavoriteStatusResponse>,
+            ApiResponse<MarketFavoritesPageResponse>,
             McpApprovalResponse,
             McpApprovalDecisionResponse,
             McpJsonRpcRequest,
@@ -162,6 +198,9 @@ use crate::{
             OrderBookResponse,
             PolymarketTokenMetadataResponse,
             VenueChainResponse,
+            CancelMarketTradesRequest,
+            CancelMultipleTradesRequest,
+            CancelTradesResponse,
             CreateTradeIntentRequest,
             CreateTradeIntentResponse,
             PolymarketExecutionType,
@@ -177,6 +216,7 @@ use crate::{
             SignupRequest,
             UpdateEmailRequest,
             UpdatePasswordRequest,
+            UpdateUsernameRequest,
             TestRunAutomationRequest,
             TestRunAutomationResponse,
             TradingProviderResponse,
@@ -224,5 +264,28 @@ impl Modify for SecurityAddon {
                 SecurityScheme::Http(Http::new(HttpAuthScheme::Bearer)),
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::Value;
+    use utoipa::OpenApi;
+
+    use super::ApiDoc;
+
+    #[test]
+    fn username_settings_path_and_schema_are_registered() {
+        let document = serde_json::to_value(ApiDoc::openapi()).unwrap();
+        let patch = &document["paths"]["/api/v1/users/settings/username"]["patch"];
+
+        assert!(patch.is_object());
+        assert_eq!(
+            patch["requestBody"]["content"]["application/json"]["schema"]["$ref"],
+            Value::String("#/components/schemas/UpdateUsernameRequest".to_owned())
+        );
+        assert!(document["components"]["schemas"]["UpdateUsernameRequest"].is_object());
+        assert!(patch["responses"]["200"].is_object());
+        assert!(patch["responses"]["409"].is_object());
     }
 }

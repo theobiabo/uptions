@@ -4,8 +4,9 @@ use crate::{
     automations::{executor::AutomationExecutor, service::AutomationService},
     config::AppConfig,
     db::{Db, connect},
+    markets::{comments::service::MarketCommentService, favorites::service::MarketFavoriteService},
     notifications::service::NotificationService,
-    polymarket::client::PolymarketClient,
+    polymarket::{client::PolymarketClient, user_stream::PolymarketUserStreamSupervisor},
     trades::service::TradeService,
     users::service::UserService,
 };
@@ -20,6 +21,8 @@ pub struct AppState {
     pub auth_service: AuthService,
     pub automation_service: AutomationService,
     pub db: Db,
+    pub market_comment_service: MarketCommentService,
+    pub market_favorite_service: MarketFavoriteService,
     pub notification_service: NotificationService,
     pub polymarket_client: PolymarketClient,
     pub trade_service: TradeService,
@@ -41,6 +44,12 @@ impl AppState {
         )
         .start();
         let polymarket_client = PolymarketClient::new(&config);
+        PolymarketUserStreamSupervisor::new(
+            db.clone(),
+            config.credential_encryption_key.clone(),
+            config.polymarket_user_ws_url.clone(),
+        )
+        .start();
         let trade_service = TradeService::new(
             db.clone(),
             polymarket_client.clone(),
@@ -57,6 +66,8 @@ impl AppState {
             ),
             automation_service,
             db: db.clone(),
+            market_comment_service: MarketCommentService::new(db.clone()),
+            market_favorite_service: MarketFavoriteService::new(db.clone()),
             notification_service,
             polymarket_client,
             trade_service,

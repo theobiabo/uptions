@@ -18,9 +18,10 @@ use uuid::Uuid;
 use crate::{
     auth::dto::{
         AuthSessionResponse, AuthUserResponse, ConnectPolymarketRequest, CreateChallengeResponse,
-        ForgotPasswordRequest, LoginRequest, LogoutResponse, ResetPasswordRequest,
-        SettingsUpdateResponse, SignupRequest, UpdateEmailRequest, UpdatePasswordRequest,
-        VenueConnectionResponse, VerifyChallengeResponse, WalletChallengeResponse,
+        ForgotPasswordRequest, LoginRequest, LogoutResponse, PolymarketSignatureType,
+        ResetPasswordRequest, SettingsUpdateResponse, SignupRequest, UpdateEmailRequest,
+        UpdatePasswordRequest, UpdateUsernameRequest, VenueConnectionResponse,
+        VerifyChallengeResponse, WalletChallengeResponse,
     },
     automations::dto::AutomationProvider,
     db::Db,
@@ -613,6 +614,44 @@ impl AuthService {
         })
     }
 
+    pub async fn update_username(
+        &self,
+        access_token: &str,
+        payload: UpdateUsernameRequest,
+    ) -> Result<AuthUserResponse, AppError> {
+        let session = self.session(access_token).await?;
+        let model = user::Entity::find_by_id(&session.user_id)
+            .one(&self.db)
+            .await?
+            .ok_or(AppError::Unauthorized)?;
+        let Some(username) =
+            requested_username_change(model.username.as_deref(), &payload.username)?
+        else {
+            return self.auth_user_response(&model).await;
+        };
+
+        let existing = user::Entity::find()
+            .filter(user::Column::Username.eq(Some(username.clone())))
+            .one(&self.db)
+            .await?;
+
+        if existing.is_some_and(|existing| existing.id != model.id) {
+            return Err(AppError::Conflict(
+                "username is already registered".to_owned(),
+            ));
+        }
+
+        let mut active = model.into_active_model();
+        active.username = Set(Some(username));
+        active.updated_at = Set(Utc::now().into());
+        let model = active
+            .update(&self.db)
+            .await
+            .map_err(username_update_error)?;
+
+        self.auth_user_response(&model).await
+    }
+
     pub async fn connect_polymarket(
         &self,
         access_token: &str,
@@ -644,7 +683,13 @@ impl AuthService {
         let funder = payload
             .funder
             .map(|address| normalize_wallet_address(&address))
-            .transpose()?;
+            .transpose()?
+            .unwrap_or_else(|| account_identifier.clone());
+        if funder != account_identifier {
+            return Err(AppError::BadRequest(
+                "EOA Polymarket funder must match account_identifier".to_owned(),
+            ));
+        }
         let signature_type = polymarket_signature_type(payload.signature_type)?;
         let limits = payload.limits.unwrap_or_else(|| json!({}));
         let permissions = payload.permissions.unwrap_or_else(default_permissions);
@@ -674,6 +719,7 @@ impl AuthService {
                 active.auth_type = Set("api_key".to_owned());
                 active.permissions = Set(permissions);
                 active.status = Set("active".to_owned());
+                active.updated_at = Set(Utc::now().into());
                 active.update(&self.db).await?
             }
             None => {
@@ -951,6 +997,15 @@ fn wallet_association_error(error: sea_orm::DbErr) -> AppError {
     }
 }
 
+fn username_update_error(error: sea_orm::DbErr) -> AppError {
+    match error.sql_err() {
+        Some(SqlErr::UniqueConstraintViolation(_)) => {
+            AppError::Conflict("username is already registered".to_owned())
+        }
+        _ => AppError::DatabaseError(error.to_string()),
+    }
+}
+
 fn venue_connection_response(model: venue_connection::Model) -> VenueConnectionResponse {
     VenueConnectionResponse {
         id: model.id,
@@ -968,16 +1023,16 @@ fn redact_limits(limits: Value) -> Value {
     limits
 }
 
-fn polymarket_signature_type(signature_type: Option<i32>) -> Result<i32, AppError> {
-    let signature_type = signature_type.unwrap_or(3);
-
-    if (0..=3).contains(&signature_type) {
-        Ok(signature_type)
-    } else {
-        Err(AppError::BadRequest(
-            "invalid polymarket signature type".to_owned(),
-        ))
+fn polymarket_signature_type(
+    signature_type: Option<PolymarketSignatureType>,
+) -> Result<i32, AppError> {
+    let signature_type = signature_type.unwrap_or(PolymarketSignatureType::Eoa);
+    if signature_type != PolymarketSignatureType::Eoa {
+        return Err(AppError::BadRequest(
+            "Polymarket private beta supports signature_type 0 (EOA) only".to_owned(),
+        ));
     }
+    Ok(signature_type.value())
 }
 
 pub fn normalize_email(email: &str) -> Result<String, AppError> {
@@ -1033,6 +1088,19 @@ pub fn normalize_username(username: &str) -> Result<String, AppError> {
     }
 
     Ok(username)
+}
+
+fn requested_username_change(
+    current_username: Option<&str>,
+    requested_username: &str,
+) -> Result<Option<String>, AppError> {
+    let username = normalize_username(requested_username)?;
+
+    if current_username == Some(username.as_str()) {
+        Ok(None)
+    } else {
+        Ok(Some(username))
+    }
 }
 
 pub fn validate_password(password: &str) -> Result<(), AppError> {
@@ -1310,11 +1378,24 @@ fn encode_hex(bytes: &[u8]) -> String {
 mod tests {
     use k256::ecdsa::SigningKey;
 
+    use crate::auth::dto::PolymarketSignatureType;
+
     use super::{
         POLYGON_CHAIN_ID, RESERVED_USERNAMES, encode_hex, ethereum_message_digest,
-        normalize_username, recover_wallet_address, verifying_key_to_address,
-        wallet_association_message,
+        normalize_username, polymarket_signature_type, recover_wallet_address,
+        requested_username_change, verifying_key_to_address, wallet_association_message,
     };
+
+    #[test]
+    fn private_beta_accepts_only_eoa_signature_type() {
+        assert_eq!(polymarket_signature_type(None).unwrap(), 0);
+        assert_eq!(
+            polymarket_signature_type(Some(PolymarketSignatureType::Eoa)).unwrap(),
+            0
+        );
+        assert!(polymarket_signature_type(Some(PolymarketSignatureType::PolyProxy)).is_err());
+        assert!(polymarket_signature_type(Some(PolymarketSignatureType::GnosisSafe)).is_err());
+    }
 
     #[test]
     fn wallet_association_message_binds_identity_context() {
@@ -1356,6 +1437,26 @@ mod tests {
         assert_ne!(
             recover_wallet_address(&altered_message, &signature).unwrap(),
             wallet_address
+        );
+    }
+
+    #[test]
+    fn username_change_supports_creation_and_replacement() {
+        assert_eq!(
+            requested_username_change(None, "  Alice_123  ").unwrap(),
+            Some("alice_123".to_owned())
+        );
+        assert_eq!(
+            requested_username_change(Some("alice_123"), "Bob_456").unwrap(),
+            Some("bob_456".to_owned())
+        );
+    }
+
+    #[test]
+    fn same_normalized_username_is_idempotent() {
+        assert_eq!(
+            requested_username_change(Some("alice_123"), "  ALICE_123 ").unwrap(),
+            None
         );
     }
 

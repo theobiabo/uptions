@@ -6,7 +6,7 @@ use base64::{
 };
 use chrono::Utc;
 use hmac::{Hmac, Mac};
-use reqwest::{Client, StatusCode};
+use reqwest::{Client, Method, StatusCode};
 use serde_json::{Value, json};
 use sha2::Sha256;
 
@@ -193,6 +193,163 @@ impl PolymarketClient {
             .map_err(|error| PolymarketSubmissionError::Ambiguous(error.to_string()))
     }
 
+    pub async fn get_order(
+        &self,
+        credentials: &PolymarketApiCredentials,
+        order_id: &str,
+    ) -> Result<Value, AppError> {
+        let order_id = clean_order_id(order_id)?;
+        let endpoint = format!("/data/order/{order_id}");
+        self.send_l2_json(credentials, Method::GET, &endpoint, None, &[])
+            .await
+    }
+
+    pub async fn get_trades(
+        &self,
+        credentials: &PolymarketApiCredentials,
+        trade_id: &str,
+    ) -> Result<Value, AppError> {
+        let trade_id = trade_id.trim();
+        if trade_id.is_empty() {
+            return Err(AppError::BadRequest(
+                "provider trade id is required".to_owned(),
+            ));
+        }
+        let query = [
+            ("id", trade_id),
+            ("maker_address", credentials.funder.as_str()),
+        ];
+        self.send_l2_json(credentials, Method::GET, "/data/trades", None, &query)
+            .await
+    }
+
+    pub async fn cancel_order(
+        &self,
+        credentials: &PolymarketApiCredentials,
+        order_id: &str,
+    ) -> Result<Value, AppError> {
+        let order_id = clean_order_id(order_id)?;
+        self.send_l2_json(
+            credentials,
+            Method::DELETE,
+            "/order",
+            Some(json!({"orderID": order_id})),
+            &[],
+        )
+        .await
+    }
+
+    pub async fn cancel_orders(
+        &self,
+        credentials: &PolymarketApiCredentials,
+        order_ids: &[String],
+    ) -> Result<Value, AppError> {
+        if order_ids.is_empty() || order_ids.len() > 1000 {
+            return Err(AppError::BadRequest(
+                "order_ids must contain between 1 and 1000 items".to_owned(),
+            ));
+        }
+        for order_id in order_ids {
+            clean_order_id(order_id)?;
+        }
+        self.send_l2_json(
+            credentials,
+            Method::DELETE,
+            "/orders",
+            Some(json!(order_ids)),
+            &[],
+        )
+        .await
+    }
+
+    pub async fn cancel_all_orders(
+        &self,
+        credentials: &PolymarketApiCredentials,
+    ) -> Result<Value, AppError> {
+        self.send_l2_json(credentials, Method::DELETE, "/cancel-all", None, &[])
+            .await
+    }
+
+    pub async fn cancel_market_orders(
+        &self,
+        credentials: &PolymarketApiCredentials,
+        market: &str,
+        asset_id: &str,
+    ) -> Result<Value, AppError> {
+        let market = market.trim();
+        let asset_id = asset_id.trim();
+        if market.is_empty() || asset_id.is_empty() {
+            return Err(AppError::BadRequest(
+                "market_id and token_id are required".to_owned(),
+            ));
+        }
+        self.send_l2_json(
+            credentials,
+            Method::DELETE,
+            "/cancel-market-orders",
+            Some(json!({"market": market, "asset_id": asset_id})),
+            &[],
+        )
+        .await
+    }
+
+    async fn send_l2_json(
+        &self,
+        credentials: &PolymarketApiCredentials,
+        method: Method,
+        endpoint: &str,
+        body: Option<Value>,
+        query: &[(&str, &str)],
+    ) -> Result<Value, AppError> {
+        let body_text = body
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(|error| AppError::BadRequest(error.to_string()))?;
+        let timestamp = unix_timestamp().to_string();
+        let signature = polymarket_hmac_signature(
+            &credentials.secret,
+            &timestamp,
+            method.as_str(),
+            endpoint,
+            body_text.as_deref(),
+        )?;
+        let mut request = self
+            .http_client
+            .request(method, format!("{}{}", self.clob_host, endpoint))
+            .header("POLY_ADDRESS", credentials.address.as_str())
+            .header("POLY_SIGNATURE", signature)
+            .header("POLY_TIMESTAMP", timestamp)
+            .header("POLY_API_KEY", credentials.api_key.as_str())
+            .header("POLY_PASSPHRASE", credentials.passphrase.as_str());
+        if !query.is_empty() {
+            request = request.query(query);
+        }
+        if let Some(body_text) = body_text {
+            request = request
+                .header("Content-Type", "application/json")
+                .body(body_text);
+        }
+        let response = request
+            .send()
+            .await
+            .map_err(|error| AppError::ExternalApiError(error.to_string()))?;
+        let status = response.status();
+        if !status.is_success() {
+            let body = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "failed to read upstream response".to_owned());
+            return Err(AppError::ExternalApiError(format!(
+                "Polymarket returned {status}: {body}"
+            )));
+        }
+        response
+            .json::<Value>()
+            .await
+            .map_err(|error| AppError::ExternalApiError(error.to_string()))
+    }
+
     async fn fetch_tick_size(&self, token_id: &str) -> Result<String, AppError> {
         let payload = self
             .fetch_clob_json("/tick-size", &[("token_id", token_id)])
@@ -265,6 +422,20 @@ fn classify_submission_http_error(
     } else {
         PolymarketSubmissionError::Definite(message)
     }
+}
+
+fn clean_order_id(order_id: &str) -> Result<String, AppError> {
+    let order_id = order_id.trim();
+    if order_id.is_empty()
+        || !order_id
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
+    {
+        return Err(AppError::BadRequest(
+            "provider order id is invalid".to_owned(),
+        ));
+    }
+    Ok(order_id.to_owned())
 }
 
 fn clean_token_id(token_id: &str) -> Result<String, AppError> {
