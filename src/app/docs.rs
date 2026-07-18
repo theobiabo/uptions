@@ -10,10 +10,10 @@ use crate::{
         PnlAvailability, StatusCount, WorkflowActivity,
     },
     auth::dto::{
-        AuthSessionResponse, AuthUserResponse, ConnectPolymarketRequest, CreateChallengeRequest,
-        CreateChallengeResponse, ForgotPasswordRequest, LoginRequest, LogoutResponse,
-        ResetPasswordRequest, SettingsUpdateResponse, SignupRequest, UpdateEmailRequest,
-        UpdatePasswordRequest, UpdateUsernameRequest, VenueConnectionResponse,
+        AccountWarningResponse, AuthSessionResponse, AuthUserResponse, ConnectPolymarketRequest,
+        CreateChallengeRequest, CreateChallengeResponse, ForgotPasswordRequest, LoginRequest,
+        LogoutResponse, ResetPasswordRequest, SettingsUpdateResponse, SignupRequest,
+        UpdateEmailRequest, UpdatePasswordRequest, UpdateUsernameRequest, VenueConnectionResponse,
         VerifyChallengeRequest, VerifyChallengeResponse, VerifyEmailRequest,
         WalletChallengeRequest, WalletChallengeResponse,
     },
@@ -130,6 +130,7 @@ use crate::{
             ApiResponse<AnalyticsOverviewResponse>,
             AuthUserResponse,
             AuthSessionResponse,
+            AccountWarningResponse,
             AutomationAlertResponse,
             AutomationResponse,
             AutomationMarketPayload,
@@ -273,6 +274,37 @@ mod tests {
     use utoipa::OpenApi;
 
     use super::ApiDoc;
+
+    #[test]
+    fn auth_user_openapi_documents_structured_account_warnings() {
+        let document = serde_json::to_value(ApiDoc::openapi()).unwrap();
+        let auth_user = &document["components"]["schemas"]["AuthUserResponse"];
+        let warnings = &auth_user["properties"]["account_warnings"];
+        let warning = &document["components"]["schemas"]["AccountWarningResponse"];
+
+        assert_eq!(warnings["type"], "array");
+        assert_eq!(
+            warnings["items"]["$ref"],
+            "#/components/schemas/AccountWarningResponse"
+        );
+        for field in [
+            "code",
+            "severity",
+            "title",
+            "message",
+            "action_label",
+            "action_href",
+        ] {
+            assert!(warning["properties"][field].is_object());
+            assert!(
+                warning["required"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|required| required == field)
+            );
+        }
+    }
 
     #[test]
     fn username_settings_path_and_schema_are_registered() {

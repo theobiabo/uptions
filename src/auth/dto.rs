@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use utoipa::ToSchema;
 
-use crate::venue::SupportedVenue;
+use crate::{polymarket::connection::EligibilityFailure, venue::SupportedVenue};
 
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct SignupRequest {
@@ -145,6 +145,66 @@ pub struct AuthUserResponse {
     pub password_configured: bool,
     pub preferred_trading_provider: Option<SupportedVenue>,
     pub venue_connections: Vec<VenueConnectionResponse>,
+    pub account_warnings: Vec<AccountWarningResponse>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, ToSchema)]
+pub struct AccountWarningResponse {
+    #[schema(example = "polymarket_wallet_mismatch")]
+    pub code: String,
+    #[schema(example = "warning")]
+    pub severity: String,
+    #[schema(example = "Reconnect Polymarket")]
+    pub title: String,
+    #[schema(example = "Your Polymarket connection no longer matches your connected wallet.")]
+    pub message: String,
+    #[schema(example = "Reconnect Polymarket")]
+    pub action_label: String,
+    #[schema(example = "/settings#trading")]
+    pub action_href: String,
+}
+
+pub(crate) fn account_warning_for_connection(
+    venue: &str,
+    enabled: bool,
+    status: &str,
+) -> Option<AccountWarningResponse> {
+    if venue != "polymarket" || !enabled {
+        return None;
+    }
+
+    let failure = EligibilityFailure::from_status(status)?;
+    let (title, message, action_label) = match failure {
+        EligibilityFailure::WalletMissing => (
+            "Connect a wallet",
+            "Your Polymarket connection needs a connected wallet before private updates can resume.",
+            "Connect wallet",
+        ),
+        EligibilityFailure::WalletMismatch => (
+            "Reconnect Polymarket",
+            "Your Polymarket connection no longer matches your connected wallet.",
+            "Reconnect Polymarket",
+        ),
+        EligibilityFailure::UnsupportedAccount => (
+            "Use a supported Polymarket account",
+            "Reconnect Polymarket with an EOA account whose signer, account, and funder match.",
+            "Reconnect with EOA",
+        ),
+        EligibilityFailure::InvalidCredentials => (
+            "Update Polymarket credentials",
+            "Your saved Polymarket credentials are invalid or incomplete.",
+            "Update credentials",
+        ),
+    };
+
+    Some(AccountWarningResponse {
+        code: failure.code().to_owned(),
+        severity: "warning".to_owned(),
+        title: title.to_owned(),
+        message: message.to_owned(),
+        action_label: action_label.to_owned(),
+        action_href: "/settings#trading".to_owned(),
+    })
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -239,7 +299,69 @@ pub struct ConnectPolymarketRequest {
 
 #[cfg(test)]
 mod tests {
-    use super::PolymarketSignatureType;
+    use crate::polymarket::connection::{
+        INVALID_CREDENTIALS_STATUS, UNSUPPORTED_ACCOUNT_STATUS, WALLET_MISMATCH_STATUS,
+        WALLET_MISSING_STATUS,
+    };
+
+    use super::{PolymarketSignatureType, account_warning_for_connection};
+
+    #[test]
+    fn account_warnings_map_action_required_connection_state() {
+        let cases = [
+            (
+                WALLET_MISSING_STATUS,
+                "polymarket_wallet_missing",
+                "Connect wallet",
+            ),
+            (
+                WALLET_MISMATCH_STATUS,
+                "polymarket_wallet_mismatch",
+                "Reconnect Polymarket",
+            ),
+            (
+                UNSUPPORTED_ACCOUNT_STATUS,
+                "polymarket_unsupported_account",
+                "Reconnect with EOA",
+            ),
+            (
+                INVALID_CREDENTIALS_STATUS,
+                "polymarket_invalid_credentials",
+                "Update credentials",
+            ),
+        ];
+
+        for (status, code, action_label) in cases {
+            let warning = account_warning_for_connection("polymarket", true, status).unwrap();
+            assert_eq!(warning.code, code);
+            assert_eq!(warning.severity, "warning");
+            assert_eq!(warning.action_label, action_label);
+            assert_eq!(warning.action_href, "/settings#trading");
+            assert!(!warning.title.is_empty());
+            assert!(!warning.message.is_empty());
+        }
+    }
+
+    #[test]
+    fn account_warnings_ignore_active_disabled_and_other_venue_connections() {
+        assert!(account_warning_for_connection("polymarket", true, "active").is_none());
+        assert!(
+            account_warning_for_connection("polymarket", false, WALLET_MISMATCH_STATUS).is_none()
+        );
+        assert!(account_warning_for_connection("kalshi", true, WALLET_MISMATCH_STATUS).is_none());
+    }
+
+    #[test]
+    fn account_warning_dto_contains_no_connection_or_credential_details() {
+        let warning =
+            account_warning_for_connection("polymarket", true, INVALID_CREDENTIALS_STATUS).unwrap();
+        let value = serde_json::to_value(warning).unwrap();
+
+        assert_eq!(value.as_object().unwrap().len(), 6);
+        assert!(value.get("credentials").is_none());
+        assert!(value.get("account_identifier").is_none());
+        assert!(value.get("connection_id").is_none());
+    }
 
     #[test]
     fn parses_only_documented_private_beta_signature_types() {

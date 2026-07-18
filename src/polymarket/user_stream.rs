@@ -18,7 +18,12 @@ use crate::{
         credentials::{decrypt_json, parse_encryption_key},
         wallet::{normalize_wallet_address, same_wallet},
     },
-    polymarket::dto::{PolymarketApiCredentials, PolymarketUserEvent},
+    polymarket::{
+        connection::{
+            ACTIVE_STATUS, EligibilityFailure, POLYMARKET_VENUE, mark_eligibility_failure,
+        },
+        dto::{PolymarketApiCredentials, PolymarketUserEvent},
+    },
     trades::dto::TradeIntentStatus,
 };
 
@@ -53,9 +58,9 @@ impl PolymarketUserStreamSupervisor {
         let mut workers: HashMap<String, WorkerHandle> = HashMap::new();
         loop {
             match venue_connection::Entity::find()
-                .filter(venue_connection::Column::Venue.eq("polymarket"))
+                .filter(venue_connection::Column::Venue.eq(POLYMARKET_VENUE))
                 .filter(venue_connection::Column::Enabled.eq(true))
-                .filter(venue_connection::Column::Status.eq("active"))
+                .filter(venue_connection::Column::Status.eq(ACTIVE_STATUS))
                 .all(&self.db)
                 .await
             {
@@ -106,12 +111,36 @@ impl PolymarketUserStreamSupervisor {
                             user_wallet.as_deref(),
                         ) {
                             Ok(credentials) => credentials,
-                            Err(message) => {
-                                warn!(
-                                    connection_id = %connection.id,
-                                    reason = %message,
-                                    "Polymarket user stream connection is not eligible"
-                                );
+                            Err(failure) => {
+                                match mark_eligibility_failure(
+                                    &self.db,
+                                    &connection.id,
+                                    &connection.status,
+                                    connection.updated_at,
+                                    failure,
+                                    chrono::Utc::now(),
+                                )
+                                .await
+                                {
+                                    Ok(true) => {
+                                        warn!(
+                                            connection_id = %connection.id,
+                                            status = failure.status(),
+                                            code = failure.code(),
+                                            reason = failure.log_reason(),
+                                            "Polymarket user stream connection requires action"
+                                        );
+                                    }
+                                    Ok(false) => {}
+                                    Err(error) => {
+                                        error!(
+                                            connection_id = %connection.id,
+                                            status = failure.status(),
+                                            error = %error,
+                                            "failed to persist Polymarket eligibility status"
+                                        );
+                                    }
+                                }
                                 continue;
                             }
                         };
@@ -138,13 +167,13 @@ fn stream_credentials(
     encryption_key: &[u8; 32],
     connection: &venue_connection::Model,
     user_wallet: Option<&str>,
-) -> Result<PolymarketApiCredentials, String> {
-    let user_wallet = user_wallet.ok_or_else(|| "connected wallet is missing".to_owned())?;
+) -> Result<PolymarketApiCredentials, EligibilityFailure> {
+    let user_wallet = user_wallet.ok_or(EligibilityFailure::WalletMissing)?;
     if !same_wallet(user_wallet, &connection.account_identifier) {
-        return Err("connection account does not match connected wallet".to_owned());
+        return Err(EligibilityFailure::WalletMismatch);
     }
-    let config =
-        decrypt_json(encryption_key, &connection.config).map_err(|error| error.to_string())?;
+    let config = decrypt_json(encryption_key, &connection.config)
+        .map_err(|_| EligibilityFailure::InvalidCredentials)?;
     let signature_type = config
         .get("signatureType")
         .and_then(|value| match value {
@@ -152,21 +181,22 @@ fn stream_credentials(
             Value::String(value) => value.parse().ok(),
             _ => None,
         })
-        .ok_or_else(|| "signature type is missing".to_owned())?;
+        .ok_or(EligibilityFailure::InvalidCredentials)?;
     if signature_type != 0 {
-        return Err("private beta supports EOA connections only".to_owned());
+        return Err(EligibilityFailure::UnsupportedAccount);
     }
     let funder = config
         .get("funder")
         .and_then(Value::as_str)
-        .ok_or_else(|| "funder is missing".to_owned())?;
-    let funder = normalize_wallet_address(funder).map_err(|error| error.to_string())?;
+        .ok_or(EligibilityFailure::InvalidCredentials)?;
+    let funder =
+        normalize_wallet_address(funder).map_err(|_| EligibilityFailure::UnsupportedAccount)?;
     if !same_wallet(&funder, &connection.account_identifier) {
-        return Err("EOA funder and account do not match".to_owned());
+        return Err(EligibilityFailure::UnsupportedAccount);
     }
     Ok(PolymarketApiCredentials {
         address: normalize_wallet_address(&connection.account_identifier)
-            .map_err(|error| error.to_string())?,
+            .map_err(|_| EligibilityFailure::UnsupportedAccount)?,
         funder,
         signature_type,
         api_key: required_config(&config, &["apiKey", "api_key", "key"])?,
@@ -175,12 +205,12 @@ fn stream_credentials(
     })
 }
 
-fn required_config(value: &Value, keys: &[&str]) -> Result<String, String> {
+fn required_config(value: &Value, keys: &[&str]) -> Result<String, EligibilityFailure> {
     keys.iter()
         .find_map(|key| value.get(*key).and_then(Value::as_str))
         .map(str::to_owned)
         .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| "credentials are incomplete".to_owned())
+        .ok_or(EligibilityFailure::InvalidCredentials)
 }
 
 async fn run_connection(
@@ -530,11 +560,95 @@ fn value_text(value: &Value) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
+    use chrono::Utc;
+    use serde_json::{Value, json};
 
-    use crate::{polymarket::dto::PolymarketUserEvent, trades::dto::TradeIntentStatus};
+    use crate::{
+        entities::venue_connection,
+        libs::credentials::encrypt_json,
+        polymarket::{connection::EligibilityFailure, dto::PolymarketUserEvent},
+        trades::dto::TradeIntentStatus,
+    };
 
-    use super::{allowed_previous_statuses, event_identity, event_order_ids};
+    use super::{allowed_previous_statuses, event_identity, event_order_ids, stream_credentials};
+
+    const WALLET: &str = "0x1111111111111111111111111111111111111111";
+    const OTHER_WALLET: &str = "0x2222222222222222222222222222222222222222";
+    const KEY: [u8; 32] = [7; 32];
+
+    fn connection(config: Value) -> venue_connection::Model {
+        venue_connection::Model {
+            id: "connection-1".to_owned(),
+            user_id: "user-1".to_owned(),
+            venue: "polymarket".to_owned(),
+            account_identifier: WALLET.to_owned(),
+            auth_type: "api_key".to_owned(),
+            config,
+            enabled: true,
+            limits: json!({}),
+            permissions: json!({}),
+            status: "active".to_owned(),
+            created_at: Utc::now().into(),
+            updated_at: Utc::now().into(),
+        }
+    }
+
+    fn encrypted_config(signature_type: i32, funder: &str, complete: bool) -> Value {
+        let mut config = json!({
+            "apiKey": "api-key",
+            "passphrase": "passphrase",
+            "funder": funder,
+            "signatureType": signature_type
+        });
+        if complete {
+            config["secret"] = Value::String("secret".to_owned());
+        }
+        encrypt_json(&KEY, &config).unwrap()
+    }
+
+    #[test]
+    fn classifies_missing_and_mismatched_connected_wallets() {
+        let connection = connection(json!({}));
+
+        assert_eq!(
+            stream_credentials(&KEY, &connection, None).unwrap_err(),
+            EligibilityFailure::WalletMissing
+        );
+        assert_eq!(
+            stream_credentials(&KEY, &connection, Some(OTHER_WALLET)).unwrap_err(),
+            EligibilityFailure::WalletMismatch
+        );
+    }
+
+    #[test]
+    fn classifies_unsupported_signature_and_funder_mismatch() {
+        let unsupported_signature = connection(encrypted_config(1, WALLET, true));
+        let mismatched_funder = connection(encrypted_config(0, OTHER_WALLET, true));
+
+        assert_eq!(
+            stream_credentials(&KEY, &unsupported_signature, Some(WALLET)).unwrap_err(),
+            EligibilityFailure::UnsupportedAccount
+        );
+        assert_eq!(
+            stream_credentials(&KEY, &mismatched_funder, Some(WALLET)).unwrap_err(),
+            EligibilityFailure::UnsupportedAccount
+        );
+    }
+
+    #[test]
+    fn classifies_invalid_and_incomplete_credentials() {
+        let invalid = connection(json!({"not": "encrypted credentials"}));
+        let incomplete = connection(encrypted_config(0, WALLET, false));
+
+        assert_eq!(
+            stream_credentials(&KEY, &invalid, Some(WALLET)).unwrap_err(),
+            EligibilityFailure::InvalidCredentials
+        );
+        assert_eq!(
+            stream_credentials(&KEY, &incomplete, Some(WALLET)).unwrap_err(),
+            EligibilityFailure::InvalidCredentials
+        );
+    }
 
     #[test]
     fn models_documented_order_and_trade_events() {

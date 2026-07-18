@@ -21,7 +21,7 @@ use crate::{
         ForgotPasswordRequest, LoginRequest, LogoutResponse, PolymarketSignatureType,
         ResetPasswordRequest, SettingsUpdateResponse, SignupRequest, UpdateEmailRequest,
         UpdatePasswordRequest, UpdateUsernameRequest, VenueConnectionResponse,
-        VerifyChallengeResponse, WalletChallengeResponse,
+        VerifyChallengeResponse, WalletChallengeResponse, account_warning_for_connection,
     },
     automations::dto::AutomationProvider,
     db::Db,
@@ -31,6 +31,7 @@ use crate::{
         credentials::{encrypt_json, parse_encryption_key},
         resend_client::send_email,
     },
+    polymarket::connection::{ACTIVE_STATUS, reconcile_polymarket_after_wallet_replacement},
     venue::SupportedVenue,
 };
 use sea_orm::{
@@ -458,6 +459,8 @@ impl AuthService {
             .await
             .map_err(wallet_association_error)?;
 
+        reconcile_polymarket_after_wallet_replacement(&txn, &user_id, &wallet_address, now).await?;
+
         if let Some(model) = auth_method::Entity::find()
             .filter(auth_method::Column::UserId.eq(&user_id))
             .filter(auth_method::Column::MethodType.eq("wallet"))
@@ -714,11 +717,10 @@ impl AuthService {
                 let mut active = model.into_active_model();
                 active.account_identifier = Set(account_identifier);
                 active.config = Set(config);
-                active.enabled = Set(true);
+                restore_polymarket_connection(&mut active);
                 active.limits = Set(limits);
                 active.auth_type = Set("api_key".to_owned());
                 active.permissions = Set(permissions);
-                active.status = Set("active".to_owned());
                 active.updated_at = Set(Utc::now().into());
                 active.update(&self.db).await?
             }
@@ -733,7 +735,7 @@ impl AuthService {
                     enabled: Set(true),
                     limits: Set(limits),
                     permissions: Set(permissions),
-                    status: Set("active".to_owned()),
+                    status: Set(ACTIVE_STATUS.to_owned()),
                     ..Default::default()
                 }
                 .insert(&self.db)
@@ -943,10 +945,21 @@ impl AuthService {
     }
 
     async fn auth_user_response(&self, user: &user::Model) -> Result<AuthUserResponse, AppError> {
-        let venue_connections = venue_connection::Entity::find()
+        let connections = venue_connection::Entity::find()
             .filter(venue_connection::Column::UserId.eq(&user.id))
             .all(&self.db)
-            .await?
+            .await?;
+        let account_warnings = connections
+            .iter()
+            .filter_map(|connection| {
+                account_warning_for_connection(
+                    &connection.venue,
+                    connection.enabled,
+                    &connection.status,
+                )
+            })
+            .collect();
+        let venue_connections = connections
             .into_iter()
             .map(venue_connection_response)
             .collect();
@@ -964,6 +977,7 @@ impl AuthService {
                 .as_deref()
                 .and_then(SupportedVenue::from_storage_value),
             venue_connections,
+            account_warnings,
         })
     }
 }
@@ -1004,6 +1018,11 @@ fn username_update_error(error: sea_orm::DbErr) -> AppError {
         }
         _ => AppError::DatabaseError(error.to_string()),
     }
+}
+
+fn restore_polymarket_connection(active: &mut venue_connection::ActiveModel) {
+    active.enabled = Set(true);
+    active.status = Set(ACTIVE_STATUS.to_owned());
 }
 
 fn venue_connection_response(model: venue_connection::Model) -> VenueConnectionResponse {
@@ -1383,8 +1402,23 @@ mod tests {
     use super::{
         POLYGON_CHAIN_ID, RESERVED_USERNAMES, encode_hex, ethereum_message_digest,
         normalize_username, polymarket_signature_type, recover_wallet_address,
-        requested_username_change, verifying_key_to_address, wallet_association_message,
+        requested_username_change, restore_polymarket_connection, verifying_key_to_address,
+        wallet_association_message,
     };
+
+    #[test]
+    fn reconnect_restores_polymarket_connection_to_active() {
+        let mut active = crate::entities::venue_connection::ActiveModel {
+            enabled: sea_orm::Set(false),
+            status: sea_orm::Set("action_required_wallet_mismatch".to_owned()),
+            ..Default::default()
+        };
+
+        restore_polymarket_connection(&mut active);
+
+        assert_eq!(active.enabled, sea_orm::Set(true));
+        assert_eq!(active.status, sea_orm::Set("active".to_owned()));
+    }
 
     #[test]
     fn private_beta_accepts_only_eoa_signature_type() {
