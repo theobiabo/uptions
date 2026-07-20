@@ -1,3 +1,3 @@
-pub mod client;
 pub mod dto;
 pub mod handlers;
+pub mod service;

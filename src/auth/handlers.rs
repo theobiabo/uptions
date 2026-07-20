@@ -1,18 +1,24 @@
 use axum::{
     Json,
-    extract::State,
+    extract::{Path, State},
     http::{HeaderMap, header},
 };
 
 use crate::{
     app::state::AppState,
     auth::dto::{
-        AuthSessionResponse, AuthUserResponse, ConnectPolymarketRequest, CreateChallengeRequest,
-        CreateChallengeResponse, ForgotPasswordRequest, LoginRequest, ResetPasswordRequest,
-        SignupRequest, VenueConnectionResponse, VerifyChallengeRequest, VerifyChallengeResponse,
-        VerifyEmailRequest,
+        AuthSessionResponse, AuthUserResponse, CreateChallengeRequest, CreateChallengeResponse,
+        ForgotPasswordRequest, LoginRequest, LogoutResponse, ResetPasswordRequest,
+        SettingsUpdateResponse, SignupRequest, UpdateEmailRequest, UpdatePasswordRequest,
+        UpdateUsernameRequest, VenueConnectionResponse, VerifyChallengeRequest,
+        VerifyChallengeResponse, VerifyEmailRequest,
     },
     error::{AppError, ErrorResponse},
+    providers::{
+        handlers::parse_provider,
+        polymarket::credentials::ConnectPolymarketRequest,
+        types::{ProviderCapability, ProviderId},
+    },
     response::{ApiResponse, ok},
 };
 
@@ -24,7 +30,7 @@ use crate::{
     responses(
         (status = 200, description = "Account created and verification email sent", body = ApiResponse<AuthUserResponse>),
         (status = 400, description = "Invalid signup payload", body = ErrorResponse),
-        (status = 409, description = "Email already registered", body = ErrorResponse)
+        (status = 409, description = "Email or username already registered", body = ErrorResponse)
     )
 )]
 pub async fn signup(
@@ -57,6 +63,46 @@ pub async fn login(
     let response = state.auth_service.login(payload).await?;
 
     Ok(ok("Logged in successfully", response))
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/v1/auth/logout",
+    tag = "Auth",
+    security(("bearer_auth" = [])),
+    responses(
+        (status = 200, description = "Current session revoked", body = ApiResponse<LogoutResponse>),
+        (status = 401, description = "Missing or invalid bearer token", body = ErrorResponse)
+    )
+)]
+pub async fn logout(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<ApiResponse<LogoutResponse>>, AppError> {
+    let access_token = bearer_token(&headers)?;
+    let response = state.auth_service.logout(&access_token).await?;
+
+    Ok(ok("Logged out successfully", response))
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/v1/auth/logout-all",
+    tag = "Auth",
+    security(("bearer_auth" = [])),
+    responses(
+        (status = 200, description = "All user sessions revoked", body = ApiResponse<LogoutResponse>),
+        (status = 401, description = "Missing or invalid bearer token", body = ErrorResponse)
+    )
+)]
+pub async fn logout_all(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<ApiResponse<LogoutResponse>>, AppError> {
+    let access_token = bearer_token(&headers)?;
+    let response = state.auth_service.logout_all(&access_token).await?;
+
+    Ok(ok("Logged out from all sessions successfully", response))
 }
 
 #[utoipa::path(
@@ -106,7 +152,7 @@ pub async fn forgot_password(
     tag = "Auth",
     request_body = ResetPasswordRequest,
     responses(
-        (status = 200, description = "Password reset and session issued", body = ApiResponse<AuthSessionResponse>),
+        (status = 200, description = "Password reset, prior sessions revoked, and new session issued", body = ApiResponse<AuthSessionResponse>),
         (status = 400, description = "Invalid or expired reset token", body = ErrorResponse)
     )
 )]
@@ -186,29 +232,121 @@ pub async fn current_user(
 }
 
 #[utoipa::path(
-    post,
-    path = "/api/v1/venue-connections/polymarket",
-    tag = "Venue Connections",
+    patch,
+    path = "/api/v1/users/settings/email",
+    tag = "Settings",
     security(("bearer_auth" = [])),
+    request_body = UpdateEmailRequest,
+    responses(
+        (status = 200, description = "Email updated and verification sent", body = ApiResponse<AuthUserResponse>),
+        (status = 400, description = "Invalid email change payload", body = ErrorResponse),
+        (status = 401, description = "Current password is invalid", body = ErrorResponse),
+        (status = 409, description = "Email already registered", body = ErrorResponse)
+    )
+)]
+pub async fn update_email(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<UpdateEmailRequest>,
+) -> Result<Json<ApiResponse<AuthUserResponse>>, AppError> {
+    let access_token = bearer_token(&headers)?;
+    let user = state
+        .auth_service
+        .update_email(&access_token, payload)
+        .await?;
+
+    Ok(ok(
+        "Email updated. Check your inbox to verify the new address.",
+        user,
+    ))
+}
+
+#[utoipa::path(
+    patch,
+    path = "/api/v1/users/settings/password",
+    tag = "Settings",
+    security(("bearer_auth" = [])),
+    request_body = UpdatePasswordRequest,
+    responses(
+        (status = 200, description = "Password updated and all sessions revoked", body = ApiResponse<SettingsUpdateResponse>),
+        (status = 400, description = "Invalid password change payload", body = ErrorResponse),
+        (status = 401, description = "Current password is invalid", body = ErrorResponse)
+    )
+)]
+pub async fn update_password(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<UpdatePasswordRequest>,
+) -> Result<Json<ApiResponse<SettingsUpdateResponse>>, AppError> {
+    let access_token = bearer_token(&headers)?;
+    let response = state
+        .auth_service
+        .update_password(&access_token, payload)
+        .await?;
+
+    Ok(ok("Password updated successfully", response))
+}
+
+#[utoipa::path(
+    patch,
+    path = "/api/v1/users/settings/username",
+    tag = "Settings",
+    security(("bearer_auth" = [])),
+    request_body = UpdateUsernameRequest,
+    responses(
+        (status = 200, description = "Username created or updated", body = ApiResponse<AuthUserResponse>),
+        (status = 400, description = "Invalid username", body = ErrorResponse),
+        (status = 401, description = "Missing or invalid bearer token", body = ErrorResponse),
+        (status = 409, description = "Username already registered", body = ErrorResponse)
+    )
+)]
+pub async fn update_username(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<UpdateUsernameRequest>,
+) -> Result<Json<ApiResponse<AuthUserResponse>>, AppError> {
+    let access_token = bearer_token(&headers)?;
+    let user = state
+        .auth_service
+        .update_username(&access_token, payload)
+        .await?;
+
+    Ok(ok("Username saved successfully", user))
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/v1/providers/{provider}/connection",
+    tag = "Provider Connections",
+    security(("bearer_auth" = [])),
+    params(("provider" = String, Path, description = "Provider route id")),
     request_body = ConnectPolymarketRequest,
     responses(
-        (status = 200, description = "Polymarket connection saved", body = ApiResponse<VenueConnectionResponse>),
-        (status = 400, description = "Invalid Polymarket connection payload", body = ErrorResponse),
+        (status = 200, description = "Provider connection saved", body = ApiResponse<VenueConnectionResponse>),
+        (status = 400, description = "Invalid provider or connection payload", body = ErrorResponse),
         (status = 401, description = "Missing or invalid bearer token", body = ErrorResponse)
     )
 )]
-pub async fn connect_polymarket(
+pub async fn connect_provider(
     State(state): State<AppState>,
     headers: HeaderMap,
+    Path(provider): Path<String>,
     Json(payload): Json<ConnectPolymarketRequest>,
 ) -> Result<Json<ApiResponse<VenueConnectionResponse>>, AppError> {
+    let provider = parse_provider(&provider)?;
+    state
+        .providers
+        .require_capability(provider, ProviderCapability::VenueConnection)?;
     let access_token = bearer_token(&headers)?;
-    let connection = state
-        .auth_service
-        .connect_polymarket(&access_token, payload)
-        .await?;
-
-    Ok(ok("Polymarket connection saved successfully", connection))
+    let connection = match provider {
+        ProviderId::Polymarket => {
+            state
+                .auth_service
+                .connect_polymarket(&access_token, payload)
+                .await?
+        }
+    };
+    Ok(ok("Provider connection saved successfully", connection))
 }
 
 pub fn bearer_token(headers: &HeaderMap) -> Result<String, AppError> {

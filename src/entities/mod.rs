@@ -1,9 +1,15 @@
 pub mod auth_method;
 pub mod automation;
 pub mod automation_alert;
+pub mod automation_observation;
 pub mod automation_run;
+pub mod market_comment;
+pub mod market_favorite;
 pub mod mcp_approval_request;
+pub mod polymarket_user_event;
+pub mod trade_intent;
 pub mod user;
 pub mod user_session;
 pub mod venue_connection;
 pub mod waitlist;
+pub mod wallet_signature_challenge;

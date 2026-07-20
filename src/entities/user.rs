@@ -9,12 +9,14 @@ pub struct Model {
     pub primary_wallet_address: Option<String>,
     pub password_hash: Option<String>,
     pub email: Option<String>,
+    #[sea_orm(unique)]
+    pub username: Option<String>,
     pub email_verified_at: Option<DateTimeWithTimeZone>,
     pub email_verification_token_hash: Option<String>,
     pub email_verification_expires_at: Option<DateTimeWithTimeZone>,
     pub password_reset_token_hash: Option<String>,
     pub password_reset_expires_at: Option<DateTimeWithTimeZone>,
-    pub preferred_trading_provider: Option<String>,
+    pub preferred_trading_provider: String,
     pub created_at: DateTimeWithTimeZone,
     pub updated_at: DateTimeWithTimeZone,
 }

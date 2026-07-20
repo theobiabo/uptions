@@ -15,6 +15,16 @@ impl MigratorTrait for Migrator {
             Box::new(m20260709_000002_mcp_approval_requests::Migration),
             Box::new(m20260710_000001_automation_runs::Migration),
             Box::new(m20260710_000002_user_trading_provider::Migration),
+            Box::new(m20260710_000003_trade_intents::Migration),
+            Box::new(m20260713_000001_automation_idempotency_key::Migration),
+            Box::new(m20260713_000002_usernames::Migration),
+            Box::new(m20260713_000003_automation_observations::Migration),
+            Box::new(m20260713_000004_wallet_signature_challenges::Migration),
+            Box::new(m20260713_000005_trade_submission_hardening::Migration),
+            Box::new(m20260713_000006_polymarket_private_beta_lifecycle::Migration),
+            Box::new(m20260718_000001_market_comments::Migration),
+            Box::new(m20260718_000002_market_favorites::Migration),
+            Box::new(m20260718_000003_provider_architecture::Migration),
         ]
     }
 }
@@ -27,3 +37,13 @@ mod m20260709_000001_automation_alert_reads;
 mod m20260709_000002_mcp_approval_requests;
 mod m20260710_000001_automation_runs;
 mod m20260710_000002_user_trading_provider;
+mod m20260710_000003_trade_intents;
+mod m20260713_000001_automation_idempotency_key;
+mod m20260713_000002_usernames;
+mod m20260713_000003_automation_observations;
+mod m20260713_000004_wallet_signature_challenges;
+mod m20260713_000005_trade_submission_hardening;
+mod m20260713_000006_polymarket_private_beta_lifecycle;
+mod m20260718_000001_market_comments;
+mod m20260718_000002_market_favorites;
+mod m20260718_000003_provider_architecture;

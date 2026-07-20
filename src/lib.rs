@@ -1,3 +1,4 @@
+pub mod analytics;
 pub mod app;
 pub mod auth;
 pub mod automations;
@@ -6,12 +7,13 @@ pub mod db;
 pub mod entities;
 pub mod error;
 pub mod libs;
+pub mod markets;
 pub mod mcp;
 pub mod notifications;
-pub mod polymarket;
+pub mod providers;
 pub mod response;
+pub mod trades;
 pub mod users;
-pub mod venue;
 
 pub fn load_env() {
     let manifest_env = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(".env");

@@ -1,10 +1,11 @@
 use axum::{
     Json,
     extract::{Path, State, rejection::JsonRejection},
-    http::HeaderMap,
+    http::{HeaderMap, header::HeaderName},
 };
 use serde::de::DeserializeOwned;
 use serde_json::Value;
+use uuid::Uuid;
 
 use crate::{
     app::state::AppState,
@@ -42,9 +43,12 @@ pub async fn list_automations(
     path = "/api/v1/automations",
     tag = "Builder",
     security(("bearer_auth" = [])),
+    params(
+        ("Idempotency-Key" = Option<String>, Header, description = "Optional UUID used to replay a previous publish for this user")
+    ),
     request_body = PublishAutomationRequest,
     responses(
-        (status = 200, description = "Automation published successfully", body = ApiResponse<AutomationResponse>),
+        (status = 200, description = "Automation published successfully or replayed", body = ApiResponse<AutomationResponse>),
         (status = 400, description = "Invalid automation payload", body = ErrorResponse),
         (status = 401, description = "Missing or invalid bearer token", body = ErrorResponse)
     )
@@ -56,7 +60,11 @@ pub async fn publish_automation(
 ) -> Result<Json<ApiResponse<AutomationResponse>>, AppError> {
     let payload: PublishAutomationRequest = parse_payload(payload, "Invalid automation payload")?;
     let user_id = authenticated_user_id(&state, &headers).await?;
-    let automation = state.automation_service.publish(&user_id, payload).await?;
+    let idempotency_key = idempotency_key(&headers)?;
+    let automation = state
+        .automation_service
+        .publish(&user_id, payload, idempotency_key)
+        .await?;
     Ok(ok("Automation published successfully", automation))
 }
 
@@ -281,7 +289,54 @@ where
         .map_err(|error| AppError::BadRequest(format!("{message}: {error}")))
 }
 
+fn idempotency_key(headers: &HeaderMap) -> Result<Option<String>, AppError> {
+    let name = HeaderName::from_static("idempotency-key");
+    let Some(value) = headers.get(name) else {
+        return Ok(None);
+    };
+    let value = value
+        .to_str()
+        .map_err(|_| AppError::BadRequest("Idempotency-Key must be a valid UUID".to_owned()))?;
+    let key = Uuid::parse_str(value)
+        .map_err(|_| AppError::BadRequest("Idempotency-Key must be a valid UUID".to_owned()))?;
+    Ok(Some(key.to_string()))
+}
+
 async fn authenticated_user_id(state: &AppState, headers: &HeaderMap) -> Result<String, AppError> {
     let access_token = bearer_token(headers)?;
     state.auth_service.current_user_id(&access_token).await
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::http::{HeaderMap, HeaderValue};
+
+    use super::idempotency_key;
+
+    #[test]
+    fn allows_missing_idempotency_key() {
+        assert_eq!(idempotency_key(&HeaderMap::new()).unwrap(), None);
+    }
+
+    #[test]
+    fn parses_and_normalizes_uuid_idempotency_key() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "idempotency-key",
+            HeaderValue::from_static("550E8400-E29B-41D4-A716-446655440000"),
+        );
+
+        assert_eq!(
+            idempotency_key(&headers).unwrap().as_deref(),
+            Some("550e8400-e29b-41d4-a716-446655440000")
+        );
+    }
+
+    #[test]
+    fn rejects_non_uuid_idempotency_key() {
+        let mut headers = HeaderMap::new();
+        headers.insert("idempotency-key", HeaderValue::from_static("retry-1"));
+
+        assert!(idempotency_key(&headers).is_err());
+    }
 }

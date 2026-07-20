@@ -14,21 +14,26 @@ axum = {  version = "0.8.9", features = [ "macros" , "json" , "query"]}
 base64 = "0.22.1"
 chrono = { version = "0.4.42", features = ["clock"] }
 dotenvy = "0.15.7"
+futures-util = "0.3.31"
+hmac = "0.12.1"
 k256 = "0.13.4"
 migration = { path = "migration" }
 rand_core = { version = "0.6.4", features = ["getrandom"] }
 reqwest = { version = "0.12.28", default-features = false, features = ["json", "rustls-tls"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
+sha2 = "0.10.9"
 sha3 = "0.10.9"
 sea-orm = { version = "2.0.0-rc", features = ["sqlx-postgres", "runtime-tokio-rustls", "macros", "with-json"] }
 sea-orm-migration = { version = "2.0.0-rc", features = ["runtime-tokio-rustls", "sqlx-postgres"] }
 thiserror = "2.0.18"
 tokio = { version = "1.52.1", features = ["full"] }
 tokio-stream = { version = "0.1.17", features = ["sync"] }
+tokio-tungstenite = { version = "0.28.0", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
-tower-http = { version = "0.6.6", features = ["cors", "trace"] }
+tower = { version = "0.5.3", features = ["limit"] }
+tower-http = { version = "0.6.6", features = ["cors", "request-id", "trace"] }
 utoipa = { version = "5.4.0", features = ["axum_extras"] }
 utoipa-swagger-ui = { version = "9.0.2", features = ["axum"] }
 uuid = { version = "1.18.1", features = ["v4", "serde"] }

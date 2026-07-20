@@ -10,25 +10,34 @@ use uuid::Uuid;
 
 use crate::{
     automations::dto::{
-        AutomationAlertResponse, AutomationProvider, AutomationResponse, AutomationStatus,
-        AutomationStepKind, PublishAutomationRequest, TestRunAutomationRequest,
-        TestRunAutomationResponse, WorkflowActionType, WorkflowPayload,
+        AutomationAlertResponse, AutomationResponse, AutomationStatus, AutomationStepKind,
+        PublishAutomationRequest, TestRunAutomationRequest, TestRunAutomationResponse,
+        WorkflowActionType, WorkflowPayload,
     },
     db::Db,
-    entities::{automation, automation_alert},
+    entities::{automation, automation_alert, automation_observation, user},
     error::AppError,
     notifications::{dto::AutomationAlertStreamEvent, service::NotificationService},
+    providers::{
+        registry::ProviderRegistry,
+        types::{ProviderCapability, ProviderId},
+    },
 };
 
 #[derive(Clone)]
 pub struct AutomationService {
     db: Db,
     notifications: NotificationService,
+    providers: ProviderRegistry,
 }
 
 impl AutomationService {
-    pub fn new(db: Db, notifications: NotificationService) -> Self {
-        Self { db, notifications }
+    pub fn new(db: Db, notifications: NotificationService, providers: ProviderRegistry) -> Self {
+        Self {
+            db,
+            notifications,
+            providers,
+        }
     }
 
     pub async fn list(&self, user_id: &str) -> Result<Vec<AutomationResponse>, AppError> {
@@ -124,22 +133,33 @@ impl AutomationService {
         payload: PublishAutomationRequest,
     ) -> Result<AutomationResponse, AppError> {
         validate_workflow(&payload.workflow)?;
-        validate_provider(payload.provider)?;
+        self.validate_user_readiness(user_id, payload.provider)
+            .await?;
+        let resolved_market = self
+            .providers
+            .resolve_market(payload.provider, &payload.market.id)
+            .await?;
         let existing = self.find_owned_automation(user_id, automation_id).await?;
         let title = clean_title(&payload.title)?;
-        let market_id = clean_required(&payload.market.id, "market id is required")?;
-        let market_title = clean_required(&payload.market.title, "market title is required")?;
+        let market_id = resolved_market.market_id;
+        let market_title = resolved_market.title;
         let workflow = serde_json::to_value(&payload.workflow)
             .map_err(|error| AppError::BadRequest(error.to_string()))?;
         let mut active = existing.into_active_model();
         active.title = Set(title);
         active.market_id = Set(Some(market_id));
         active.market_title = Set(Some(market_title));
-        active.venue = Set(payload.provider.venue_id().to_owned());
+        active.provider = Set(payload.provider.storage_value().to_owned());
+        active.chain = Set(resolved_market.chain.storage_value().to_owned());
+        active.chain_id = Set(resolved_market.chain.id().value() as i64);
         active.workflow = Set(workflow);
         active.status = Set("active".to_owned());
         active.updated_at = Set(Utc::now().into());
         let model = active.update(&self.db).await?;
+        automation_observation::Entity::delete_many()
+            .filter(automation_observation::Column::AutomationId.eq(automation_id))
+            .exec(&self.db)
+            .await?;
         let response = automation_response(model);
         self.create_alert(
             user_id,
@@ -166,6 +186,12 @@ impl AutomationService {
         status: AutomationStatus,
     ) -> Result<AutomationResponse, AppError> {
         let model = self.find_owned_automation(user_id, automation_id).await?;
+        if status == AutomationStatus::Active {
+            let provider = ProviderId::from_storage(&model.provider).ok_or_else(|| {
+                AppError::BadRequest("stored automation provider is invalid".to_owned())
+            })?;
+            self.validate_user_readiness(user_id, provider).await?;
+        }
         let mut active = model.into_active_model();
         active.status = Set(status.as_str().to_owned());
         active.updated_at = Set(Utc::now().into());
@@ -220,32 +246,59 @@ impl AutomationService {
         &self,
         user_id: &str,
         payload: PublishAutomationRequest,
+        idempotency_key: Option<String>,
     ) -> Result<AutomationResponse, AppError> {
+        if let Some(model) = self
+            .find_by_idempotency_key(user_id, idempotency_key.as_deref())
+            .await?
+        {
+            return Ok(automation_response(model));
+        }
         validate_workflow(&payload.workflow)?;
-        validate_provider(payload.provider)?;
+        self.validate_user_readiness(user_id, payload.provider)
+            .await?;
+        let resolved_market = self
+            .providers
+            .resolve_market(payload.provider, &payload.market.id)
+            .await?;
         let title = clean_title(&payload.title)?;
-        let market_id = clean_required(&payload.market.id, "market id is required")?;
-        let market_title = clean_required(&payload.market.title, "market title is required")?;
-        let venue = payload.provider.venue_id().to_owned();
+        let market_id = resolved_market.market_id;
+        let market_title = resolved_market.title;
+        let provider = payload.provider.storage_value().to_owned();
+        let chain = resolved_market.chain.storage_value().to_owned();
+        let chain_id = resolved_market.chain.id().value() as i64;
         let workflow = serde_json::to_value(&payload.workflow)
             .map_err(|error| AppError::BadRequest(error.to_string()))?;
         let now = Utc::now();
         let model = automation::ActiveModel {
             id: Set(Uuid::new_v4().to_string()),
             user_id: Set(user_id.to_owned()),
+            idempotency_key: Set(idempotency_key.clone()),
             title: Set(title),
             market_id: Set(Some(market_id)),
             market_title: Set(Some(market_title)),
-            venue: Set(venue),
+            provider: Set(provider),
+            chain: Set(chain),
+            chain_id: Set(chain_id),
             status: Set("active".to_owned()),
             workflow: Set(workflow),
             last_run_status: Set(None),
             last_run_at: Set(None),
             created_at: Set(now.into()),
             updated_at: Set(now.into()),
-        }
-        .insert(&self.db)
-        .await?;
+        };
+        let model = match model.insert(&self.db).await {
+            Ok(model) => model,
+            Err(error) => {
+                if let Some(model) = self
+                    .find_by_idempotency_key(user_id, idempotency_key.as_deref())
+                    .await?
+                {
+                    return Ok(automation_response(model));
+                }
+                return Err(error.into());
+            }
+        };
         let response = automation_response(model);
         self.create_alert(
             user_id,
@@ -265,23 +318,43 @@ impl AutomationService {
         Ok(response)
     }
 
+    async fn find_by_idempotency_key(
+        &self,
+        user_id: &str,
+        idempotency_key: Option<&str>,
+    ) -> Result<Option<automation::Model>, AppError> {
+        let Some(idempotency_key) = idempotency_key else {
+            return Ok(None);
+        };
+        Ok(automation::Entity::find()
+            .filter(automation::Column::UserId.eq(user_id))
+            .filter(automation::Column::IdempotencyKey.eq(idempotency_key))
+            .one(&self.db)
+            .await?)
+    }
+
     pub async fn test_run(
         &self,
         user_id: &str,
         payload: TestRunAutomationRequest,
     ) -> Result<TestRunAutomationResponse, AppError> {
         validate_workflow(&payload.workflow)?;
+        self.validate_user_readiness(user_id, payload.provider)
+            .await?;
+        self.providers
+            .resolve_market(payload.provider, &payload.market.id)
+            .await?;
         let checked_blocks = payload.workflow.steps.len();
         let automation_id = clean_optional(payload.automation_id);
         let title = clean_title(&payload.title)?;
         let message = format!(
-            "Test run completed successfully for {title} with {checked_blocks} workflow steps."
+            "Workflow validation completed for {title} with {checked_blocks} steps. No actions were performed."
         );
         let alert = self
             .create_alert(
                 user_id,
                 automation_id.clone(),
-                "Test run completed",
+                "Workflow validation completed",
                 &message,
                 "success",
                 json!({
@@ -291,16 +364,6 @@ impl AutomationService {
                 }),
             )
             .await?;
-
-        if let Some(id) = automation_id {
-            if let Ok(model) = self.find_owned_automation(user_id, &id).await {
-                let mut active = model.into_active_model();
-                active.last_run_status = Set(Some("success".to_owned()));
-                active.last_run_at = Set(Some(Utc::now().into()));
-                active.updated_at = Set(Utc::now().into());
-                active.update(&self.db).await?;
-            }
-        }
 
         Ok(TestRunAutomationResponse {
             status: "success".to_owned(),
@@ -332,6 +395,39 @@ impl AutomationService {
             .one(&self.db)
             .await?
             .ok_or_else(|| AppError::NotFound("automation not found".to_owned()))
+    }
+
+    async fn validate_user_readiness(
+        &self,
+        user_id: &str,
+        provider: ProviderId,
+    ) -> Result<(), AppError> {
+        self.providers
+            .require_capability(provider, ProviderCapability::Automations)?;
+        let model = user::Entity::find_by_id(user_id.to_owned())
+            .one(&self.db)
+            .await?
+            .ok_or(AppError::Unauthorized)?;
+        let selected_provider = ProviderId::from_storage(&model.preferred_trading_provider)
+            .ok_or_else(|| {
+                AppError::BadRequest(
+                    "select a trading provider before publishing automation".to_owned(),
+                )
+            })?;
+
+        if selected_provider != provider {
+            return Err(AppError::BadRequest(
+                "selected trading provider does not match this automation".to_owned(),
+            ));
+        }
+
+        if model.primary_wallet_address.is_none() {
+            return Err(AppError::BadRequest(
+                "connect a wallet before publishing automation".to_owned(),
+            ));
+        }
+
+        Ok(())
     }
 
     pub async fn create_alert(
@@ -392,13 +488,15 @@ fn validate_workflow(workflow: &WorkflowPayload) -> Result<(), AppError> {
         validate_params(step.action, &step.params)?;
     }
 
-    if !workflow
+    if workflow
         .steps
         .iter()
-        .any(|step| step.kind == AutomationStepKind::Trigger)
+        .filter(|step| step.kind == AutomationStepKind::Trigger)
+        .count()
+        != 1
     {
         return Err(AppError::BadRequest(
-            "workflow must contain at least one trigger".to_owned(),
+            "workflow must contain exactly one trigger".to_owned(),
         ));
     }
 
@@ -474,13 +572,7 @@ fn validate_connections(workflow: &WorkflowPayload, ids: &HashSet<&str>) -> Resu
         ));
     }
 
-    if workflow.steps.len() > 1 && has_disconnected_steps(workflow) {
-        return Err(AppError::BadRequest(
-            "connect all workflow steps into one executable path".to_owned(),
-        ));
-    }
-
-    Ok(())
+    validate_linear_path(workflow)
 }
 
 fn validate_action_kind(
@@ -521,7 +613,11 @@ fn validate_params(action: WorkflowActionType, params: &Value) -> Result<(), App
             )?;
         }
         WorkflowActionType::TriggerTimeCheck => {
-            non_empty_string(params, "interval", "interval is required")?;
+            string_enum(
+                params,
+                "interval",
+                &["5m", "15m", "30m", "1h", "4h", "12h", "24h"],
+            )?;
         }
         WorkflowActionType::ConditionOutcomePriceAbove => {
             string_enum(params, "outcome", &["YES", "NO"])?;
@@ -537,10 +633,17 @@ fn validate_params(action: WorkflowActionType, params: &Value) -> Result<(), App
             string_enum(params, "operator", &["ABOVE"])?;
             positive_number(params, "volume", "volume must be positive")?;
         }
-        WorkflowActionType::Buy | WorkflowActionType::Sell => {
+        WorkflowActionType::Buy => {
             string_enum(params, "outcome", &["YES", "NO"])?;
-            string_enum(params, "order_type", &["MARKET", "LIMIT"])?;
-            positive_number(params, "amount", "amount must be positive")?;
+            string_enum(params, "order_type", &["LIMIT"])?;
+            positive_number(params, "usdc_amount", "usdc_amount must be positive")?;
+            probability(params, "limit_price")?;
+        }
+        WorkflowActionType::Sell => {
+            string_enum(params, "outcome", &["YES", "NO"])?;
+            string_enum(params, "order_type", &["LIMIT"])?;
+            positive_number(params, "shares", "shares must be positive")?;
+            probability(params, "limit_price")?;
         }
         WorkflowActionType::SendMessage => {
             string_enum(params, "channel", &["IN_APP"])?;
@@ -601,24 +704,71 @@ fn visit<'a>(
     false
 }
 
-fn has_disconnected_steps(workflow: &WorkflowPayload) -> bool {
-    let mut connected = HashSet::new();
-
-    for connection in &workflow.connections {
-        connected.insert(connection.from.as_str());
-        connected.insert(connection.to.as_str());
+fn validate_linear_path(workflow: &WorkflowPayload) -> Result<(), AppError> {
+    if workflow.connections.len() + 1 != workflow.steps.len() {
+        return Err(AppError::BadRequest(
+            "workflow must be one linear path without branches".to_owned(),
+        ));
     }
 
-    workflow
+    let mut incoming = HashMap::<&str, usize>::new();
+    let mut outgoing = HashMap::<&str, &str>::new();
+
+    for step in &workflow.steps {
+        incoming.insert(step.id.as_str(), 0);
+    }
+
+    for connection in &workflow.connections {
+        let count = incoming.entry(connection.to.as_str()).or_default();
+        *count += 1;
+
+        if *count > 1 || outgoing.insert(&connection.from, &connection.to).is_some() {
+            return Err(AppError::BadRequest(
+                "workflow must be one linear path without branches".to_owned(),
+            ));
+        }
+    }
+
+    let roots = workflow
         .steps
         .iter()
-        .any(|step| !connected.contains(step.id.as_str()))
-}
+        .filter(|step| incoming.get(step.id.as_str()) == Some(&0))
+        .collect::<Vec<_>>();
+    let sinks = workflow
+        .steps
+        .iter()
+        .filter(|step| !outgoing.contains_key(step.id.as_str()))
+        .collect::<Vec<_>>();
 
-fn validate_provider(provider: AutomationProvider) -> Result<(), AppError> {
-    if provider != AutomationProvider::Polymarket {
+    if roots.len() != 1
+        || roots[0].kind != AutomationStepKind::Trigger
+        || sinks.len() != 1
+        || sinks[0].kind != AutomationStepKind::Action
+    {
         return Err(AppError::BadRequest(
-            "unsupported automation provider".to_owned(),
+            "workflow must be one linear path from a trigger to an action".to_owned(),
+        ));
+    }
+
+    let mut visited = HashSet::new();
+    let mut current = roots[0].id.as_str();
+
+    loop {
+        if !visited.insert(current) {
+            return Err(AppError::BadRequest(
+                "workflow cannot contain loops".to_owned(),
+            ));
+        }
+
+        let Some(next) = outgoing.get(current) else {
+            break;
+        };
+        current = *next;
+    }
+
+    if visited.len() != workflow.steps.len() {
+        return Err(AppError::BadRequest(
+            "connect all workflow steps into one executable path".to_owned(),
         ));
     }
 
@@ -705,12 +855,19 @@ fn clean_optional(value: Option<String>) -> Option<String> {
 }
 
 fn automation_response(model: automation::Model) -> AutomationResponse {
+    let provider = ProviderId::from_storage(&model.provider)
+        .expect("persisted automation provider must be canonical");
+    let chain = crate::providers::types::Chain::from_storage(&model.chain)
+        .expect("persisted automation chain must be canonical");
     AutomationResponse {
         id: model.id,
         title: model.title,
         market_id: model.market_id,
         market_title: model.market_title,
-        venue: model.venue,
+        provider,
+        chain,
+        chain_id: crate::providers::types::ChainId(model.chain_id as u64),
+        venue: provider.route_value().to_owned(),
         status: model.status,
         workflow: model.workflow,
         last_run_status: model.last_run_status,
