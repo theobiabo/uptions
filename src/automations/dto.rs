@@ -2,45 +2,7 @@ use serde::{Deserialize, Deserializer, Serialize, de};
 use serde_json::Value;
 use utoipa::ToSchema;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, ToSchema)]
-#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
-pub enum AutomationProvider {
-    Polymarket,
-}
-
-impl AutomationProvider {
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Polymarket => "Polymarket",
-        }
-    }
-
-    pub fn venue_id(self) -> &'static str {
-        match self {
-            Self::Polymarket => "polymarket",
-        }
-    }
-}
-
-impl Default for AutomationProvider {
-    fn default() -> Self {
-        Self::Polymarket
-    }
-}
-
-impl<'de> Deserialize<'de> for AutomationProvider {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let value = String::deserialize(deserializer)?;
-
-        match normalize_enum_value(&value).as_str() {
-            "POLYMARKET" => Ok(Self::Polymarket),
-            _ => Err(de::Error::custom("provider is invalid")),
-        }
-    }
-}
+use crate::providers::types::{Chain, ChainId, ProviderId};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, ToSchema)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -145,8 +107,7 @@ pub struct PublishAutomationRequest {
     #[schema(example = "New Playboi Carti Album before GTA VI?")]
     pub title: String,
     pub market: AutomationMarketPayload,
-    #[serde(default)]
-    pub provider: AutomationProvider,
+    pub provider: ProviderId,
     pub workflow: WorkflowPayload,
 }
 
@@ -193,8 +154,7 @@ pub struct TestRunAutomationRequest {
     #[schema(example = "New Playboi Carti Album before GTA VI?")]
     pub title: String,
     pub market: AutomationMarketPayload,
-    #[serde(default)]
-    pub provider: AutomationProvider,
+    pub provider: ProviderId,
     pub workflow: WorkflowPayload,
 }
 
@@ -208,6 +168,9 @@ pub struct AutomationResponse {
     pub market_id: Option<String>,
     #[schema(example = "New Playboi Carti Album before GTA VI?")]
     pub market_title: Option<String>,
+    pub provider: ProviderId,
+    pub chain: Chain,
+    pub chain_id: ChainId,
     #[schema(example = "polymarket")]
     pub venue: String,
     #[schema(example = "active")]
@@ -283,7 +246,10 @@ fn normalize_enum_value(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{AutomationStatus, PublishAutomationRequest, UpdateAutomationStatusRequest};
-    use crate::automations::dto::{AutomationProvider, AutomationStepKind, WorkflowActionType};
+    use crate::{
+        automations::dto::{AutomationStepKind, WorkflowActionType},
+        providers::types::ProviderId,
+    };
 
     #[test]
     fn deserializes_frontend_publish_payload() {
@@ -328,7 +294,7 @@ mod tests {
 
         let request: PublishAutomationRequest = serde_json::from_value(payload).unwrap();
 
-        assert_eq!(request.provider, AutomationProvider::Polymarket);
+        assert_eq!(request.provider, ProviderId::Polymarket);
         assert_eq!(request.workflow.steps[0].kind, AutomationStepKind::Trigger);
         assert_eq!(
             request.workflow.steps[0].action,
@@ -345,7 +311,7 @@ mod tests {
     }
 
     #[test]
-    fn defaults_provider_when_omitted() {
+    fn rejects_omitted_provider_at_internal_automation_boundary() {
         let payload = serde_json::json!({
             "title": "Backend default provider",
             "market": {
@@ -382,9 +348,7 @@ mod tests {
             }
         });
 
-        let request: PublishAutomationRequest = serde_json::from_value(payload).unwrap();
-
-        assert_eq!(request.provider, AutomationProvider::Polymarket);
+        assert!(serde_json::from_value::<PublishAutomationRequest>(payload).is_err());
     }
 
     #[test]
@@ -428,7 +392,7 @@ mod tests {
 
         let request: PublishAutomationRequest = serde_json::from_value(payload).unwrap();
 
-        assert_eq!(request.provider, AutomationProvider::Polymarket);
+        assert_eq!(request.provider, ProviderId::Polymarket);
         assert_eq!(request.workflow.steps[0].kind, AutomationStepKind::Trigger);
         assert_eq!(
             request.workflow.steps[0].action,

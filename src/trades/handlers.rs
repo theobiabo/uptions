@@ -10,6 +10,7 @@ use crate::{
     error::{AppError, ErrorResponse},
     response::{ApiResponse, ok},
     trades::dto::{
+        CancelMarketTradesRequest, CancelMultipleTradesRequest, CancelTradesResponse,
         CreateTradeIntentRequest, CreateTradeIntentResponse, ReconcileTradeResponse,
         SubmitSignedTradeRequest, SubmitSignedTradeResponse, TradeIntentResponse,
     },
@@ -119,7 +120,7 @@ pub async fn submit_signed_trade(
     security(("bearer_auth" = [])),
     params(("trade_id" = String, Path, description = "Trade id")),
     responses(
-        (status = 200, description = "Trade marked or confirmed as requiring manual reconciliation", body = ApiResponse<ReconcileTradeResponse>),
+        (status = 200, description = "Trade reconciled with Polymarket REST when a provider order ID is available", body = ApiResponse<ReconcileTradeResponse>),
         (status = 401, description = "Missing or invalid bearer token", body = ErrorResponse),
         (status = 409, description = "Trade does not require reconciliation or submission is still active", body = ErrorResponse),
         (status = 404, description = "Trade not found", body = ErrorResponse)
@@ -134,6 +135,99 @@ pub async fn reconcile_trade(
     let response = state.trade_service.reconcile(&user_id, &trade_id).await?;
 
     Ok(ok("Trade reconciliation state checked", response))
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/v1/trades/{trade_id}/cancel",
+    tag = "Trades",
+    security(("bearer_auth" = [])),
+    params(("trade_id" = String, Path, description = "Trade id")),
+    responses(
+        (status = 200, description = "Cancellation requested and provider result applied", body = ApiResponse<CancelTradesResponse>),
+        (status = 401, description = "Missing or invalid bearer token", body = ErrorResponse),
+        (status = 404, description = "Trade not found", body = ErrorResponse),
+        (status = 409, description = "Trade has no cancellable provider order", body = ErrorResponse),
+        (status = 502, description = "Polymarket cancellation error", body = ErrorResponse)
+    )
+)]
+pub async fn cancel_trade(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(trade_id): Path<String>,
+) -> Result<Json<ApiResponse<CancelTradesResponse>>, AppError> {
+    let user_id = authenticated_user_id(&state, &headers).await?;
+    let response = state.trade_service.cancel_one(&user_id, &trade_id).await?;
+    Ok(ok("Trade cancellation processed", response))
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/v1/trades/cancel-multiple",
+    tag = "Trades",
+    security(("bearer_auth" = [])),
+    request_body = CancelMultipleTradesRequest,
+    responses(
+        (status = 200, description = "Multiple cancellations requested and provider result applied", body = ApiResponse<CancelTradesResponse>),
+        (status = 400, description = "Invalid trade list", body = ErrorResponse),
+        (status = 401, description = "Missing or invalid bearer token", body = ErrorResponse),
+        (status = 502, description = "Polymarket cancellation error", body = ErrorResponse)
+    )
+)]
+pub async fn cancel_multiple_trades(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<CancelMultipleTradesRequest>,
+) -> Result<Json<ApiResponse<CancelTradesResponse>>, AppError> {
+    let user_id = authenticated_user_id(&state, &headers).await?;
+    let response = state
+        .trade_service
+        .cancel_multiple(&user_id, payload)
+        .await?;
+    Ok(ok("Trade cancellations processed", response))
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/v1/trades/cancel-all",
+    tag = "Trades",
+    security(("bearer_auth" = [])),
+    responses(
+        (status = 200, description = "All Polymarket cancellations requested and provider result applied", body = ApiResponse<CancelTradesResponse>),
+        (status = 401, description = "Missing or invalid bearer token", body = ErrorResponse),
+        (status = 502, description = "Polymarket cancellation error", body = ErrorResponse)
+    )
+)]
+pub async fn cancel_all_trades(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<ApiResponse<CancelTradesResponse>>, AppError> {
+    let user_id = authenticated_user_id(&state, &headers).await?;
+    let response = state.trade_service.cancel_all(&user_id).await?;
+    Ok(ok("All trade cancellations processed", response))
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/v1/trades/cancel-market",
+    tag = "Trades",
+    security(("bearer_auth" = [])),
+    request_body = CancelMarketTradesRequest,
+    responses(
+        (status = 200, description = "Market and token cancellations requested and provider result applied", body = ApiResponse<CancelTradesResponse>),
+        (status = 400, description = "Market and token are required", body = ErrorResponse),
+        (status = 401, description = "Missing or invalid bearer token", body = ErrorResponse),
+        (status = 502, description = "Polymarket cancellation error", body = ErrorResponse)
+    )
+)]
+pub async fn cancel_market_trades(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<CancelMarketTradesRequest>,
+) -> Result<Json<ApiResponse<CancelTradesResponse>>, AppError> {
+    let user_id = authenticated_user_id(&state, &headers).await?;
+    let response = state.trade_service.cancel_market(&user_id, payload).await?;
+    Ok(ok("Market trade cancellations processed", response))
 }
 
 async fn authenticated_user_id(state: &AppState, headers: &HeaderMap) -> Result<String, AppError> {

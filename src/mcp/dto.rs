@@ -4,7 +4,8 @@ use utoipa::ToSchema;
 
 use crate::{
     automations::dto::{AutomationMarketPayload, WorkflowActionType, WorkflowPayload},
-    polymarket::dto::MarketsQuery,
+    markets::types::MarketListQuery,
+    providers::types::ProviderId,
 };
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -60,6 +61,7 @@ pub struct PromptGetParams {
 
 #[derive(Debug, Deserialize)]
 pub struct AutomationToolPayload {
+    pub provider: ProviderId,
     pub market: AutomationMarketPayload,
     pub title: String,
     pub workflow: WorkflowPayload,
@@ -68,6 +70,7 @@ pub struct AutomationToolPayload {
 #[derive(Debug, Deserialize)]
 pub struct UpdateAutomationToolPayload {
     pub automation_id: String,
+    pub provider: ProviderId,
     pub market: AutomationMarketPayload,
     pub title: String,
     pub workflow: WorkflowPayload,
@@ -81,6 +84,7 @@ pub struct AutomationIdPayload {
 #[derive(Debug, Deserialize)]
 pub struct TestRunAutomationToolPayload {
     pub automation_id: Option<String>,
+    pub provider: ProviderId,
     pub market: AutomationMarketPayload,
     pub title: String,
     pub workflow: WorkflowPayload,
@@ -88,6 +92,7 @@ pub struct TestRunAutomationToolPayload {
 
 #[derive(Debug, Deserialize)]
 pub struct SearchMarketsPayload {
+    pub provider: ProviderId,
     pub active: Option<bool>,
     pub archived: Option<bool>,
     pub closed: Option<bool>,
@@ -97,11 +102,12 @@ pub struct SearchMarketsPayload {
     pub slug: Option<String>,
 }
 
-impl From<SearchMarketsPayload> for MarketsQuery {
+impl From<SearchMarketsPayload> for MarketListQuery {
     fn from(payload: SearchMarketsPayload) -> Self {
         Self {
             active: payload.active,
             archived: payload.archived,
+            cursor: None,
             closed: payload.closed,
             id: payload.id,
             limit: payload.limit,
@@ -113,11 +119,13 @@ impl From<SearchMarketsPayload> for MarketsQuery {
 
 #[derive(Debug, Deserialize)]
 pub struct MarketIdPayload {
+    pub provider: ProviderId,
     pub market_id: String,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct PrepareTradeActionPayload {
+    pub provider: ProviderId,
     pub action: WorkflowActionType,
     pub amount: f64,
     pub market: AutomationMarketPayload,

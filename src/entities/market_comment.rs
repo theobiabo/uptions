@@ -1,21 +1,14 @@
 use sea_orm::entity::prelude::*;
-use serde_json::Value;
 
-#[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
-#[sea_orm(table_name = "venue_connections")]
+#[derive(Clone, Debug, PartialEq, DeriveEntityModel, Eq)]
+#[sea_orm(table_name = "market_comments")]
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     pub id: String,
-    pub user_id: String,
     pub provider: String,
-    pub venue: String,
-    pub account_identifier: String,
-    pub auth_type: String,
-    pub config: Value,
-    pub enabled: bool,
-    pub limits: Value,
-    pub permissions: Value,
-    pub status: String,
+    pub market_id: String,
+    pub author_id: String,
+    pub body: String,
     pub created_at: DateTimeWithTimeZone,
     pub updated_at: DateTimeWithTimeZone,
 }

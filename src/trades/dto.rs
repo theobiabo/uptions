@@ -2,7 +2,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use utoipa::ToSchema;
 
-use crate::{polymarket::dto::PolymarketTokenMetadataResponse, venue::SupportedVenue};
+use crate::providers::{
+    polymarket::dto::{PolymarketExecutionType, PolymarketTokenMetadataResponse},
+    types::ProviderId,
+};
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -36,36 +39,20 @@ impl TradeOrderType {
     }
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, ToSchema)]
-#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
-pub enum PolymarketExecutionType {
-    Fok,
-    Fak,
-    Gtc,
-    Gtd,
-}
-
-impl PolymarketExecutionType {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Fok => "FOK",
-            Self::Fak => "FAK",
-            Self::Gtc => "GTC",
-            Self::Gtd => "GTD",
-        }
-    }
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TradeIntentStatus {
     PendingSignature,
     Submitting,
     ReconciliationRequired,
     Submitted,
+    Matched,
+    Mined,
+    Retrying,
     Filled,
     PartiallyFilled,
     Rejected,
     Failed,
+    CancellationRequested,
     Cancelled,
 }
 
@@ -76,10 +63,14 @@ impl TradeIntentStatus {
             Self::Submitting => "submitting",
             Self::ReconciliationRequired => "reconciliation_required",
             Self::Submitted => "submitted",
+            Self::Matched => "matched",
+            Self::Mined => "mined",
+            Self::Retrying => "retrying",
             Self::Filled => "filled",
             Self::PartiallyFilled => "partially_filled",
             Self::Rejected => "rejected",
             Self::Failed => "failed",
+            Self::CancellationRequested => "cancellation_requested",
             Self::Cancelled => "cancelled",
         }
     }
@@ -98,7 +89,7 @@ pub struct CreateTradeIntentRequest {
     #[schema(example = "YES")]
     pub outcome: String,
     pub price: Option<f64>,
-    pub provider: SupportedVenue,
+    pub provider: ProviderId,
     pub side: TradeSide,
     pub order_type: TradeOrderType,
     pub execution_type: PolymarketExecutionType,
@@ -144,9 +135,16 @@ pub struct TradeIntentResponse {
     pub reconciliation_checked_at: Option<String>,
     pub side: String,
     pub signed_order_hash: Option<String>,
+    pub signed_maker_amount_base: Option<String>,
+    pub signed_taker_amount_base: Option<String>,
+    pub normalized_amount_base: Option<String>,
+    pub normalized_price_numerator: Option<String>,
+    pub normalized_price_denominator: Option<String>,
     pub status: String,
     pub submission_started_at: Option<String>,
     pub submitted_at: Option<String>,
+    pub cancellation_requested_at: Option<String>,
+    pub cancelled_at: Option<String>,
     pub token_id: String,
     pub updated_at: String,
     pub wallet_address: String,
@@ -170,4 +168,24 @@ pub struct ReconcileTradeResponse {
     pub provider_lookup_available: bool,
     pub resolution: String,
     pub trade: TradeIntentResponse,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct CancelMultipleTradesRequest {
+    #[schema(min_items = 1, max_items = 1000)]
+    pub trade_ids: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct CancelMarketTradesRequest {
+    pub provider: ProviderId,
+    pub market_id: String,
+    pub token_id: String,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct CancelTradesResponse {
+    #[schema(value_type = Object)]
+    pub provider_response: Value,
+    pub trades: Vec<TradeIntentResponse>,
 }

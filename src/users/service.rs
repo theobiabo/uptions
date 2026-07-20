@@ -1,11 +1,16 @@
 use crate::{
     db::Db,
-    entities::{user, waitlist},
+    entities::{automation, automation_alert, user, waitlist},
     error::AppError,
     libs::resend_client::send_email,
-    venue::SupportedVenue,
+    providers::types::ProviderId,
 };
-use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, IntoActiveModel, QueryFilter, Set};
+use chrono::Utc;
+use sea_orm::{
+    ActiveModelTrait, ColumnTrait, EntityTrait, IntoActiveModel, QueryFilter, Set, TransactionTrait,
+};
+use serde_json::json;
+use uuid::Uuid;
 
 pub struct JoinWaitlistStruct {
     pub email: String,
@@ -24,16 +29,56 @@ impl UserService {
     pub async fn set_preferred_trading_provider(
         &self,
         user_id: &str,
-        provider: SupportedVenue,
-    ) -> Result<SupportedVenue, AppError> {
+        provider: ProviderId,
+    ) -> Result<ProviderId, AppError> {
         let model = user::Entity::find_by_id(user_id.to_owned())
             .one(&self.db)
             .await?
             .ok_or(AppError::Unauthorized)?;
+        let previous = ProviderId::from_storage(&model.preferred_trading_provider);
+        if previous == Some(provider) {
+            return Ok(provider);
+        }
+        let txn = self.db.begin().await?;
         let mut active = model.into_active_model();
-        active.preferred_trading_provider = Set(Some(provider.as_storage_value().to_owned()));
-        active.update(&self.db).await?;
-
+        active.preferred_trading_provider = Set(provider.storage_value().to_owned());
+        active.updated_at = Set(Utc::now().into());
+        active.update(&txn).await?;
+        let paused = automation::Entity::update_many()
+            .set(automation::ActiveModel {
+                status: Set("paused".to_owned()),
+                last_run_status: Set(Some("action_required_provider_changed".to_owned())),
+                updated_at: Set(Utc::now().into()),
+                ..Default::default()
+            })
+            .filter(automation::Column::UserId.eq(user_id))
+            .filter(automation::Column::Status.eq("active"))
+            .filter(automation::Column::Provider.ne(provider.storage_value()))
+            .exec(&txn)
+            .await?;
+        if paused.rows_affected > 0 {
+            automation_alert::ActiveModel {
+                id: Set(Uuid::new_v4().to_string()),
+                user_id: Set(user_id.to_owned()),
+                automation_id: Set(None),
+                title: Set("Automations paused".to_owned()),
+                message: Set(format!(
+                    "{} automation(s) use your previous provider and were paused for review.",
+                    paused.rows_affected
+                )),
+                status: Set("warning".to_owned()),
+                meta: Set(json!({
+                    "type": "automation_provider_changed",
+                    "selected_provider": provider,
+                    "paused_count": paused.rows_affected
+                })),
+                created_at: Set(Utc::now().into()),
+                read_at: Set(None),
+            }
+            .insert(&txn)
+            .await?;
+        }
+        txn.commit().await?;
         Ok(provider)
     }
 

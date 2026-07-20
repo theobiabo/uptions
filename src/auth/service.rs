@@ -17,12 +17,11 @@ use uuid::Uuid;
 
 use crate::{
     auth::dto::{
-        AuthSessionResponse, AuthUserResponse, ConnectPolymarketRequest, CreateChallengeResponse,
-        ForgotPasswordRequest, LoginRequest, LogoutResponse, ResetPasswordRequest,
-        SettingsUpdateResponse, SignupRequest, UpdateEmailRequest, UpdatePasswordRequest,
-        VenueConnectionResponse, VerifyChallengeResponse, WalletChallengeResponse,
+        AuthSessionResponse, AuthUserResponse, CreateChallengeResponse, ForgotPasswordRequest,
+        LoginRequest, LogoutResponse, ResetPasswordRequest, SettingsUpdateResponse, SignupRequest,
+        UpdateEmailRequest, UpdatePasswordRequest, UpdateUsernameRequest, VenueConnectionResponse,
+        VerifyChallengeResponse, WalletChallengeResponse, account_warning_for_connection,
     },
-    automations::dto::AutomationProvider,
     db::Db,
     entities::{auth_method, user, user_session, venue_connection, wallet_signature_challenge},
     error::AppError,
@@ -30,7 +29,13 @@ use crate::{
         credentials::{encrypt_json, parse_encryption_key},
         resend_client::send_email,
     },
-    venue::SupportedVenue,
+    providers::{
+        polymarket::{
+            connection::{ACTIVE_STATUS, reconcile_polymarket_after_wallet_replacement},
+            credentials::{ConnectPolymarketRequest, PolymarketSignatureType},
+        },
+        types::{Chain, ChainId, DEFAULT_PROVIDER, ProviderId},
+    },
 };
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, EntityTrait, IntoActiveModel, QueryFilter, Set, SqlErr,
@@ -40,7 +45,7 @@ use serde_json::{Value, json};
 
 const CHALLENGE_TTL_SECONDS: u64 = 300;
 const WALLET_ASSOCIATION_PURPOSE: &str = "associate_wallet";
-const POLYGON_CHAIN_ID: u64 = 137;
+
 const SESSION_TTL_SECONDS: u64 = 60 * 60 * 24 * 30;
 const EMAIL_VERIFICATION_TTL_SECONDS: u64 = 60 * 60 * 24;
 const PASSWORD_RESET_TTL_SECONDS: u64 = 60 * 60;
@@ -122,28 +127,36 @@ impl AuthService {
         &self,
         access_token: &str,
         wallet_address: &str,
-        chain_id: u64,
+        provider: ProviderId,
+        chain: Chain,
+        chain_id: ChainId,
     ) -> Result<WalletChallengeResponse, AppError> {
-        if chain_id != POLYGON_CHAIN_ID {
-            return Err(AppError::BadRequest(
-                "wallet association requires Polygon chain ID 137".to_owned(),
-            ));
-        }
-
+        validate_provider_chain(provider, chain, chain_id)?;
         let user_id = self.session(access_token).await?.user_id;
+        self.ensure_selected_provider(&user_id, provider).await?;
         let wallet_address = normalize_wallet_address(wallet_address)?;
         self.ensure_wallet_available(&user_id, &wallet_address)
             .await?;
 
         let nonce = Uuid::new_v4().to_string();
         let expires_at = unix_timestamp() + CHALLENGE_TTL_SECONDS;
-        let message = wallet_association_message(&user_id, &wallet_address, &nonce, expires_at);
+        let message = wallet_association_message(
+            &user_id,
+            provider,
+            chain,
+            chain_id,
+            &wallet_address,
+            &nonce,
+            expires_at,
+        );
 
         wallet_signature_challenge::ActiveModel {
             id: Set(Uuid::new_v4().to_string()),
             user_id: Set(user_id),
             purpose: Set(WALLET_ASSOCIATION_PURPOSE.to_owned()),
-            chain_id: Set(POLYGON_CHAIN_ID as i64),
+            provider: Set(provider.storage_value().to_owned()),
+            chain: Set(chain.storage_value().to_owned()),
+            chain_id: Set(chain_id.value() as i64),
             wallet_address: Set(wallet_address.clone()),
             nonce_hash: Set(hash_access_token(&nonce)),
             expires_at: Set(DateTime::<Utc>::from_timestamp(expires_at as i64, 0)
@@ -156,7 +169,9 @@ impl AuthService {
 
         Ok(WalletChallengeResponse {
             purpose: WALLET_ASSOCIATION_PURPOSE.to_owned(),
-            chain_id: POLYGON_CHAIN_ID,
+            provider,
+            chain,
+            chain_id,
             wallet_address,
             nonce,
             message,
@@ -199,6 +214,7 @@ impl AuthService {
             email: Set(Some(email.clone())),
             username: Set(Some(username)),
             password_hash: Set(Some(password_hash)),
+            preferred_trading_provider: Set(DEFAULT_PROVIDER.storage_value().to_owned()),
             email_verification_token_hash: Set(Some(hash_access_token(&verification_token))),
             email_verification_expires_at: Set(Some(verification_expires_at.into())),
             ..Default::default()
@@ -371,17 +387,15 @@ impl AuthService {
         &self,
         access_token: &str,
         wallet_address: &str,
-        chain_id: u64,
+        provider: ProviderId,
+        chain: Chain,
+        chain_id: ChainId,
         nonce: &str,
         signature: &str,
     ) -> Result<String, AppError> {
-        if chain_id != POLYGON_CHAIN_ID {
-            return Err(AppError::BadRequest(
-                "wallet association requires Polygon chain ID 137".to_owned(),
-            ));
-        }
-
+        validate_provider_chain(provider, chain, chain_id)?;
         let user_id = self.session(access_token).await?.user_id;
+        self.ensure_selected_provider(&user_id, provider).await?;
         let wallet_address = normalize_wallet_address(wallet_address)?;
         let nonce = normalize_token(nonce)?;
         let challenge = wallet_signature_challenge::Entity::find()
@@ -393,7 +407,9 @@ impl AuthService {
 
         if challenge.user_id != user_id
             || challenge.purpose != WALLET_ASSOCIATION_PURPOSE
-            || challenge.chain_id != POLYGON_CHAIN_ID as i64
+            || challenge.provider != provider.storage_value()
+            || challenge.chain != chain.storage_value()
+            || challenge.chain_id != chain_id.value() as i64
             || challenge.wallet_address != wallet_address
             || challenge.used_at.is_some()
             || expires_at <= Utc::now()
@@ -402,7 +418,15 @@ impl AuthService {
         }
 
         let expires_at_unix = expires_at.timestamp() as u64;
-        let message = wallet_association_message(&user_id, &wallet_address, nonce, expires_at_unix);
+        let message = wallet_association_message(
+            &user_id,
+            provider,
+            chain,
+            chain_id,
+            &wallet_address,
+            nonce,
+            expires_at_unix,
+        );
         let recovered_address = recover_wallet_address(&message, signature)?;
         if recovered_address != wallet_address {
             return Err(AppError::Unauthorized);
@@ -457,6 +481,8 @@ impl AuthService {
             .await
             .map_err(wallet_association_error)?;
 
+        reconcile_polymarket_after_wallet_replacement(&txn, &user_id, &wallet_address, now).await?;
+
         if let Some(model) = auth_method::Entity::find()
             .filter(auth_method::Column::UserId.eq(&user_id))
             .filter(auth_method::Column::MethodType.eq("wallet"))
@@ -477,7 +503,9 @@ impl AuthService {
                 method_type: Set("wallet".to_owned()),
                 external_id: Set(wallet_address.clone()),
                 meta: Set(json!({
-                    "chain_id": POLYGON_CHAIN_ID,
+                    "provider": provider,
+                    "chain": chain,
+                    "chain_id": chain_id,
                     "verified_by": WALLET_ASSOCIATION_PURPOSE
                 })),
                 ..Default::default()
@@ -613,6 +641,44 @@ impl AuthService {
         })
     }
 
+    pub async fn update_username(
+        &self,
+        access_token: &str,
+        payload: UpdateUsernameRequest,
+    ) -> Result<AuthUserResponse, AppError> {
+        let session = self.session(access_token).await?;
+        let model = user::Entity::find_by_id(&session.user_id)
+            .one(&self.db)
+            .await?
+            .ok_or(AppError::Unauthorized)?;
+        let Some(username) =
+            requested_username_change(model.username.as_deref(), &payload.username)?
+        else {
+            return self.auth_user_response(&model).await;
+        };
+
+        let existing = user::Entity::find()
+            .filter(user::Column::Username.eq(Some(username.clone())))
+            .one(&self.db)
+            .await?;
+
+        if existing.is_some_and(|existing| existing.id != model.id) {
+            return Err(AppError::Conflict(
+                "username is already registered".to_owned(),
+            ));
+        }
+
+        let mut active = model.into_active_model();
+        active.username = Set(Some(username));
+        active.updated_at = Set(Utc::now().into());
+        let model = active
+            .update(&self.db)
+            .await
+            .map_err(username_update_error)?;
+
+        self.auth_user_response(&model).await
+    }
+
     pub async fn connect_polymarket(
         &self,
         access_token: &str,
@@ -623,6 +689,8 @@ impl AuthService {
             .one(&self.db)
             .await?
             .ok_or(AppError::Unauthorized)?;
+        let provider = ProviderId::Polymarket;
+        ensure_selected_provider(&user, provider)?;
 
         if payload.api_key.trim().is_empty()
             || payload.secret.trim().is_empty()
@@ -644,7 +712,13 @@ impl AuthService {
         let funder = payload
             .funder
             .map(|address| normalize_wallet_address(&address))
-            .transpose()?;
+            .transpose()?
+            .unwrap_or_else(|| account_identifier.clone());
+        if funder != account_identifier {
+            return Err(AppError::BadRequest(
+                "EOA Polymarket funder must match account_identifier".to_owned(),
+            ));
+        }
         let signature_type = polymarket_signature_type(payload.signature_type)?;
         let limits = payload.limits.unwrap_or_else(|| json!({}));
         let permissions = payload.permissions.unwrap_or_else(default_permissions);
@@ -657,37 +731,39 @@ impl AuthService {
         });
         let config = encrypt_json(&self.credential_encryption_key, &credential_config)?;
 
-        let provider = AutomationProvider::Polymarket;
         let existing = venue_connection::Entity::find()
             .filter(venue_connection::Column::UserId.eq(&session.user_id))
-            .filter(venue_connection::Column::Venue.eq(provider.venue_id()))
+            .filter(venue_connection::Column::Provider.eq(provider.storage_value()))
             .one(&self.db)
             .await?;
 
         let connection = match existing {
             Some(model) => {
                 let mut active = model.into_active_model();
+                active.provider = Set(provider.storage_value().to_owned());
+                active.venue = Set(provider.route_value().to_owned());
                 active.account_identifier = Set(account_identifier);
                 active.config = Set(config);
-                active.enabled = Set(true);
+                restore_polymarket_connection(&mut active);
                 active.limits = Set(limits);
                 active.auth_type = Set("api_key".to_owned());
                 active.permissions = Set(permissions);
-                active.status = Set("active".to_owned());
+                active.updated_at = Set(Utc::now().into());
                 active.update(&self.db).await?
             }
             None => {
                 venue_connection::ActiveModel {
                     id: Set(Uuid::new_v4().to_string()),
                     user_id: Set(session.user_id),
-                    venue: Set(provider.venue_id().to_owned()),
+                    provider: Set(provider.storage_value().to_owned()),
+                    venue: Set(provider.route_value().to_owned()),
                     account_identifier: Set(account_identifier),
                     auth_type: Set("api_key".to_owned()),
                     config: Set(config),
                     enabled: Set(true),
                     limits: Set(limits),
                     permissions: Set(permissions),
-                    status: Set("active".to_owned()),
+                    status: Set(ACTIVE_STATUS.to_owned()),
                     ..Default::default()
                 }
                 .insert(&self.db)
@@ -696,6 +772,18 @@ impl AuthService {
         };
 
         Ok(venue_connection_response(connection))
+    }
+
+    async fn ensure_selected_provider(
+        &self,
+        user_id: &str,
+        provider: ProviderId,
+    ) -> Result<(), AppError> {
+        let user = user::Entity::find_by_id(user_id)
+            .one(&self.db)
+            .await?
+            .ok_or(AppError::Unauthorized)?;
+        ensure_selected_provider(&user, provider)
     }
 
     async fn ensure_wallet_available(
@@ -765,6 +853,7 @@ impl AuthService {
         let model = user::ActiveModel {
             id: Set(user_id.clone()),
             primary_wallet_address: Set(Some(wallet_address.to_owned())),
+            preferred_trading_provider: Set(DEFAULT_PROVIDER.storage_value().to_owned()),
             ..Default::default()
         }
         .insert(&self.db)
@@ -897,10 +986,21 @@ impl AuthService {
     }
 
     async fn auth_user_response(&self, user: &user::Model) -> Result<AuthUserResponse, AppError> {
-        let venue_connections = venue_connection::Entity::find()
+        let connections = venue_connection::Entity::find()
             .filter(venue_connection::Column::UserId.eq(&user.id))
             .all(&self.db)
-            .await?
+            .await?;
+        let account_warnings = connections
+            .iter()
+            .filter_map(|connection| {
+                account_warning_for_connection(
+                    &connection.provider,
+                    connection.enabled,
+                    &connection.status,
+                )
+            })
+            .collect();
+        let venue_connections = connections
             .into_iter()
             .map(venue_connection_response)
             .collect();
@@ -913,11 +1013,10 @@ impl AuthService {
             username: user.username.clone(),
             email_verified: user.email.is_none() || user.email_verified_at.is_some(),
             password_configured: user.password_hash.is_some(),
-            preferred_trading_provider: user
-                .preferred_trading_provider
-                .as_deref()
-                .and_then(SupportedVenue::from_storage_value),
+            preferred_trading_provider: ProviderId::from_storage(&user.preferred_trading_provider)
+                .expect("preferred provider is backfilled before serving requests"),
             venue_connections,
+            account_warnings,
         })
     }
 }
@@ -927,15 +1026,50 @@ struct CreatedSession {
     expires_at: i64,
 }
 
+fn ensure_selected_provider(user: &user::Model, provider: ProviderId) -> Result<(), AppError> {
+    let selected = ProviderId::from_storage(&user.preferred_trading_provider)
+        .ok_or_else(|| AppError::BadRequest("selected provider is invalid".to_owned()))?;
+    if selected != provider {
+        return Err(AppError::ProviderValidation {
+            code: "SELECTED_PROVIDER_MISMATCH",
+            message: "provider action must match the selected provider".to_owned(),
+        });
+    }
+    Ok(())
+}
+
 fn wallet_association_message(
     user_id: &str,
+    provider: ProviderId,
+    chain: Chain,
+    chain_id: ChainId,
     wallet_address: &str,
     nonce: &str,
     expires_at: u64,
 ) -> String {
     format!(
-        "Uptions Wallet Association\nPurpose: {WALLET_ASSOCIATION_PURPOSE}\nUser ID: {user_id}\nChain ID: {POLYGON_CHAIN_ID}\nWallet: {wallet_address}\nNonce: {nonce}\nExpires At: {expires_at}"
+        "Uptions Wallet Association\nPurpose: {WALLET_ASSOCIATION_PURPOSE}\nUser ID: {user_id}\nProvider: {}\nChain: {}\nChain ID: {}\nWallet: {wallet_address}\nNonce: {nonce}\nExpires At: {expires_at}",
+        provider.api_value(),
+        chain.api_value(),
+        chain_id.value()
     )
+}
+
+fn validate_provider_chain(
+    provider: ProviderId,
+    chain: Chain,
+    chain_id: ChainId,
+) -> Result<(), AppError> {
+    let expected_chain = match provider {
+        ProviderId::Polymarket => Chain::Polygon,
+    };
+    if chain != expected_chain || chain_id != expected_chain.id() {
+        return Err(AppError::ProviderValidation {
+            code: "PROVIDER_CHAIN_MISMATCH",
+            message: "wallet chain is not supported by selected provider".to_owned(),
+        });
+    }
+    Ok(())
 }
 
 fn invalid_wallet_challenge() -> AppError {
@@ -951,10 +1085,27 @@ fn wallet_association_error(error: sea_orm::DbErr) -> AppError {
     }
 }
 
+fn username_update_error(error: sea_orm::DbErr) -> AppError {
+    match error.sql_err() {
+        Some(SqlErr::UniqueConstraintViolation(_)) => {
+            AppError::Conflict("username is already registered".to_owned())
+        }
+        _ => AppError::DatabaseError(error.to_string()),
+    }
+}
+
+fn restore_polymarket_connection(active: &mut venue_connection::ActiveModel) {
+    active.enabled = Set(true);
+    active.status = Set(ACTIVE_STATUS.to_owned());
+}
+
 fn venue_connection_response(model: venue_connection::Model) -> VenueConnectionResponse {
+    let provider = ProviderId::from_storage(&model.provider)
+        .expect("persisted venue connection provider must be canonical");
     VenueConnectionResponse {
         id: model.id,
-        venue: model.venue,
+        provider,
+        venue: provider.route_value().to_owned(),
         auth_type: model.auth_type,
         account_identifier: model.account_identifier,
         enabled: model.enabled,
@@ -968,16 +1119,16 @@ fn redact_limits(limits: Value) -> Value {
     limits
 }
 
-fn polymarket_signature_type(signature_type: Option<i32>) -> Result<i32, AppError> {
-    let signature_type = signature_type.unwrap_or(3);
-
-    if (0..=3).contains(&signature_type) {
-        Ok(signature_type)
-    } else {
-        Err(AppError::BadRequest(
-            "invalid polymarket signature type".to_owned(),
-        ))
+fn polymarket_signature_type(
+    signature_type: Option<PolymarketSignatureType>,
+) -> Result<i32, AppError> {
+    let signature_type = signature_type.unwrap_or(PolymarketSignatureType::Eoa);
+    if signature_type != PolymarketSignatureType::Eoa {
+        return Err(AppError::BadRequest(
+            "Polymarket private beta supports signature_type 0 (EOA) only".to_owned(),
+        ));
     }
+    Ok(signature_type.value())
 }
 
 pub fn normalize_email(email: &str) -> Result<String, AppError> {
@@ -1033,6 +1184,19 @@ pub fn normalize_username(username: &str) -> Result<String, AppError> {
     }
 
     Ok(username)
+}
+
+fn requested_username_change(
+    current_username: Option<&str>,
+    requested_username: &str,
+) -> Result<Option<String>, AppError> {
+    let username = normalize_username(requested_username)?;
+
+    if current_username == Some(username.as_str()) {
+        Ok(None)
+    } else {
+        Ok(Some(username))
+    }
 }
 
 pub fn validate_password(password: &str) -> Result<(), AppError> {
@@ -1310,16 +1474,49 @@ fn encode_hex(bytes: &[u8]) -> String {
 mod tests {
     use k256::ecdsa::SigningKey;
 
-    use super::{
-        POLYGON_CHAIN_ID, RESERVED_USERNAMES, encode_hex, ethereum_message_digest,
-        normalize_username, recover_wallet_address, verifying_key_to_address,
-        wallet_association_message,
+    use crate::{
+        providers::polymarket::credentials::PolymarketSignatureType,
+        providers::types::{Chain, ChainId, ProviderId},
     };
+
+    use super::{
+        RESERVED_USERNAMES, encode_hex, ethereum_message_digest, normalize_username,
+        polymarket_signature_type, recover_wallet_address, requested_username_change,
+        restore_polymarket_connection, verifying_key_to_address, wallet_association_message,
+    };
+
+    #[test]
+    fn reconnect_restores_polymarket_connection_to_active() {
+        let mut active = crate::entities::venue_connection::ActiveModel {
+            enabled: sea_orm::Set(false),
+            status: sea_orm::Set("action_required_wallet_mismatch".to_owned()),
+            ..Default::default()
+        };
+
+        restore_polymarket_connection(&mut active);
+
+        assert_eq!(active.enabled, sea_orm::Set(true));
+        assert_eq!(active.status, sea_orm::Set("active".to_owned()));
+    }
+
+    #[test]
+    fn private_beta_accepts_only_eoa_signature_type() {
+        assert_eq!(polymarket_signature_type(None).unwrap(), 0);
+        assert_eq!(
+            polymarket_signature_type(Some(PolymarketSignatureType::Eoa)).unwrap(),
+            0
+        );
+        assert!(polymarket_signature_type(Some(PolymarketSignatureType::PolyProxy)).is_err());
+        assert!(polymarket_signature_type(Some(PolymarketSignatureType::GnosisSafe)).is_err());
+    }
 
     #[test]
     fn wallet_association_message_binds_identity_context() {
         let message = wallet_association_message(
             "user-123",
+            ProviderId::Polymarket,
+            Chain::Polygon,
+            ChainId::POLYGON,
             "0x1111111111111111111111111111111111111111",
             "nonce-456",
             1_760_000_000,
@@ -1327,9 +1524,7 @@ mod tests {
 
         assert_eq!(
             message,
-            format!(
-                "Uptions Wallet Association\nPurpose: associate_wallet\nUser ID: user-123\nChain ID: {POLYGON_CHAIN_ID}\nWallet: 0x1111111111111111111111111111111111111111\nNonce: nonce-456\nExpires At: 1760000000"
-            )
+            "Uptions Wallet Association\nPurpose: associate_wallet\nUser ID: user-123\nProvider: POLYMARKET\nChain: POLYGON\nChain ID: 137\nWallet: 0x1111111111111111111111111111111111111111\nNonce: nonce-456\nExpires At: 1760000000"
         );
     }
 
@@ -1337,8 +1532,15 @@ mod tests {
     fn wallet_signature_cannot_be_reused_for_another_nonce() {
         let signing_key = SigningKey::from_bytes(&[7u8; 32].into()).unwrap();
         let wallet_address = verifying_key_to_address(signing_key.verifying_key());
-        let message =
-            wallet_association_message("user-123", &wallet_address, "nonce-456", 1_760_000_000);
+        let message = wallet_association_message(
+            "user-123",
+            ProviderId::Polymarket,
+            Chain::Polygon,
+            ChainId::POLYGON,
+            &wallet_address,
+            "nonce-456",
+            1_760_000_000,
+        );
         let (signature, recovery_id) = signing_key
             .sign_digest_recoverable(ethereum_message_digest(&message))
             .unwrap();
@@ -1351,11 +1553,38 @@ mod tests {
             wallet_address
         );
 
-        let altered_message =
-            wallet_association_message("user-123", &wallet_address, "nonce-789", 1_760_000_000);
+        let altered_message = wallet_association_message(
+            "user-123",
+            ProviderId::Polymarket,
+            Chain::Polygon,
+            ChainId::POLYGON,
+            &wallet_address,
+            "nonce-789",
+            1_760_000_000,
+        );
         assert_ne!(
             recover_wallet_address(&altered_message, &signature).unwrap(),
             wallet_address
+        );
+    }
+
+    #[test]
+    fn username_change_supports_creation_and_replacement() {
+        assert_eq!(
+            requested_username_change(None, "  Alice_123  ").unwrap(),
+            Some("alice_123".to_owned())
+        );
+        assert_eq!(
+            requested_username_change(Some("alice_123"), "Bob_456").unwrap(),
+            Some("bob_456".to_owned())
+        );
+    }
+
+    #[test]
+    fn same_normalized_username_is_idempotent() {
+        assert_eq!(
+            requested_username_change(Some("alice_123"), "  ALICE_123 ").unwrap(),
+            None
         );
     }
 

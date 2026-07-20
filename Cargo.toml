@@ -14,6 +14,7 @@ axum = {  version = "0.8.9", features = [ "macros" , "json" , "query"]}
 base64 = "0.22.1"
 chrono = { version = "0.4.42", features = ["clock"] }
 dotenvy = "0.15.7"
+futures-util = "0.3.31"
 hmac = "0.12.1"
 k256 = "0.13.4"
 migration = { path = "migration" }
@@ -28,6 +29,7 @@ sea-orm-migration = { version = "2.0.0-rc", features = ["runtime-tokio-rustls", 
 thiserror = "2.0.18"
 tokio = { version = "1.52.1", features = ["full"] }
 tokio-stream = { version = "0.1.17", features = ["sync"] }
+tokio-tungstenite = { version = "0.28.0", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 tower = { version = "0.5.3", features = ["limit"] }

@@ -10,26 +10,34 @@ use uuid::Uuid;
 
 use crate::{
     automations::dto::{
-        AutomationAlertResponse, AutomationProvider, AutomationResponse, AutomationStatus,
-        AutomationStepKind, PublishAutomationRequest, TestRunAutomationRequest,
-        TestRunAutomationResponse, WorkflowActionType, WorkflowPayload,
+        AutomationAlertResponse, AutomationResponse, AutomationStatus, AutomationStepKind,
+        PublishAutomationRequest, TestRunAutomationRequest, TestRunAutomationResponse,
+        WorkflowActionType, WorkflowPayload,
     },
     db::Db,
     entities::{automation, automation_alert, automation_observation, user},
     error::AppError,
     notifications::{dto::AutomationAlertStreamEvent, service::NotificationService},
-    venue::SupportedVenue,
+    providers::{
+        registry::ProviderRegistry,
+        types::{ProviderCapability, ProviderId},
+    },
 };
 
 #[derive(Clone)]
 pub struct AutomationService {
     db: Db,
     notifications: NotificationService,
+    providers: ProviderRegistry,
 }
 
 impl AutomationService {
-    pub fn new(db: Db, notifications: NotificationService) -> Self {
-        Self { db, notifications }
+    pub fn new(db: Db, notifications: NotificationService, providers: ProviderRegistry) -> Self {
+        Self {
+            db,
+            notifications,
+            providers,
+        }
     }
 
     pub async fn list(&self, user_id: &str) -> Result<Vec<AutomationResponse>, AppError> {
@@ -125,20 +133,25 @@ impl AutomationService {
         payload: PublishAutomationRequest,
     ) -> Result<AutomationResponse, AppError> {
         validate_workflow(&payload.workflow)?;
-        validate_provider(payload.provider)?;
         self.validate_user_readiness(user_id, payload.provider)
+            .await?;
+        let resolved_market = self
+            .providers
+            .resolve_market(payload.provider, &payload.market.id)
             .await?;
         let existing = self.find_owned_automation(user_id, automation_id).await?;
         let title = clean_title(&payload.title)?;
-        let market_id = clean_required(&payload.market.id, "market id is required")?;
-        let market_title = clean_required(&payload.market.title, "market title is required")?;
+        let market_id = resolved_market.market_id;
+        let market_title = resolved_market.title;
         let workflow = serde_json::to_value(&payload.workflow)
             .map_err(|error| AppError::BadRequest(error.to_string()))?;
         let mut active = existing.into_active_model();
         active.title = Set(title);
         active.market_id = Set(Some(market_id));
         active.market_title = Set(Some(market_title));
-        active.venue = Set(payload.provider.venue_id().to_owned());
+        active.provider = Set(payload.provider.storage_value().to_owned());
+        active.chain = Set(resolved_market.chain.storage_value().to_owned());
+        active.chain_id = Set(resolved_market.chain.id().value() as i64);
         active.workflow = Set(workflow);
         active.status = Set("active".to_owned());
         active.updated_at = Set(Utc::now().into());
@@ -173,6 +186,12 @@ impl AutomationService {
         status: AutomationStatus,
     ) -> Result<AutomationResponse, AppError> {
         let model = self.find_owned_automation(user_id, automation_id).await?;
+        if status == AutomationStatus::Active {
+            let provider = ProviderId::from_storage(&model.provider).ok_or_else(|| {
+                AppError::BadRequest("stored automation provider is invalid".to_owned())
+            })?;
+            self.validate_user_readiness(user_id, provider).await?;
+        }
         let mut active = model.into_active_model();
         active.status = Set(status.as_str().to_owned());
         active.updated_at = Set(Utc::now().into());
@@ -236,13 +255,18 @@ impl AutomationService {
             return Ok(automation_response(model));
         }
         validate_workflow(&payload.workflow)?;
-        validate_provider(payload.provider)?;
         self.validate_user_readiness(user_id, payload.provider)
             .await?;
+        let resolved_market = self
+            .providers
+            .resolve_market(payload.provider, &payload.market.id)
+            .await?;
         let title = clean_title(&payload.title)?;
-        let market_id = clean_required(&payload.market.id, "market id is required")?;
-        let market_title = clean_required(&payload.market.title, "market title is required")?;
-        let venue = payload.provider.venue_id().to_owned();
+        let market_id = resolved_market.market_id;
+        let market_title = resolved_market.title;
+        let provider = payload.provider.storage_value().to_owned();
+        let chain = resolved_market.chain.storage_value().to_owned();
+        let chain_id = resolved_market.chain.id().value() as i64;
         let workflow = serde_json::to_value(&payload.workflow)
             .map_err(|error| AppError::BadRequest(error.to_string()))?;
         let now = Utc::now();
@@ -253,7 +277,9 @@ impl AutomationService {
             title: Set(title),
             market_id: Set(Some(market_id)),
             market_title: Set(Some(market_title)),
-            venue: Set(venue),
+            provider: Set(provider),
+            chain: Set(chain),
+            chain_id: Set(chain_id),
             status: Set("active".to_owned()),
             workflow: Set(workflow),
             last_run_status: Set(None),
@@ -313,6 +339,11 @@ impl AutomationService {
         payload: TestRunAutomationRequest,
     ) -> Result<TestRunAutomationResponse, AppError> {
         validate_workflow(&payload.workflow)?;
+        self.validate_user_readiness(user_id, payload.provider)
+            .await?;
+        self.providers
+            .resolve_market(payload.provider, &payload.market.id)
+            .await?;
         let checked_blocks = payload.workflow.steps.len();
         let automation_id = clean_optional(payload.automation_id);
         let title = clean_title(&payload.title)?;
@@ -369,23 +400,22 @@ impl AutomationService {
     async fn validate_user_readiness(
         &self,
         user_id: &str,
-        provider: AutomationProvider,
+        provider: ProviderId,
     ) -> Result<(), AppError> {
+        self.providers
+            .require_capability(provider, ProviderCapability::Automations)?;
         let model = user::Entity::find_by_id(user_id.to_owned())
             .one(&self.db)
             .await?
             .ok_or(AppError::Unauthorized)?;
-        let selected_provider = model
-            .preferred_trading_provider
-            .as_deref()
-            .and_then(SupportedVenue::from_storage_value)
+        let selected_provider = ProviderId::from_storage(&model.preferred_trading_provider)
             .ok_or_else(|| {
                 AppError::BadRequest(
                     "select a trading provider before publishing automation".to_owned(),
                 )
             })?;
 
-        if selected_provider.id() != provider.venue_id() {
+        if selected_provider != provider {
             return Err(AppError::BadRequest(
                 "selected trading provider does not match this automation".to_owned(),
             ));
@@ -745,16 +775,6 @@ fn validate_linear_path(workflow: &WorkflowPayload) -> Result<(), AppError> {
     Ok(())
 }
 
-fn validate_provider(provider: AutomationProvider) -> Result<(), AppError> {
-    if provider != AutomationProvider::Polymarket {
-        return Err(AppError::BadRequest(
-            "unsupported automation provider".to_owned(),
-        ));
-    }
-
-    Ok(())
-}
-
 fn kind_order(kind: AutomationStepKind) -> u8 {
     match kind {
         AutomationStepKind::Trigger => 1,
@@ -835,12 +855,19 @@ fn clean_optional(value: Option<String>) -> Option<String> {
 }
 
 fn automation_response(model: automation::Model) -> AutomationResponse {
+    let provider = ProviderId::from_storage(&model.provider)
+        .expect("persisted automation provider must be canonical");
+    let chain = crate::providers::types::Chain::from_storage(&model.chain)
+        .expect("persisted automation chain must be canonical");
     AutomationResponse {
         id: model.id,
         title: model.title,
         market_id: model.market_id,
         market_title: model.market_title,
-        venue: model.venue,
+        provider,
+        chain,
+        chain_id: crate::providers::types::ChainId(model.chain_id as u64),
+        venue: provider.route_value().to_owned(),
         status: model.status,
         workflow: model.workflow,
         last_run_status: model.last_run_status,

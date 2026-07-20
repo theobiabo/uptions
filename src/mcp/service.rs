@@ -11,17 +11,18 @@ use crate::{
     app::state::AppState,
     auth::handlers::bearer_token,
     automations::dto::{
-        AutomationProvider, AutomationStatus, PublishAutomationRequest, TestRunAutomationRequest,
-        WorkflowActionType,
+        AutomationStatus, PublishAutomationRequest, TestRunAutomationRequest, WorkflowActionType,
     },
     entities::{automation_alert, mcp_approval_request, venue_connection},
     error::AppError,
+    markets::types::MarketResponse,
     mcp::dto::{
         AutomationIdPayload, AutomationToolPayload, MarketIdPayload, McpApprovalDecisionResponse,
         McpApprovalResponse, McpRequest, PrepareTradeActionPayload, PromptGetParams,
         ResourceReadParams, SearchMarketsPayload, TestRunAutomationToolPayload, ToolCallParams,
         UpdateAutomationToolPayload,
     },
+    providers::types::{DEFAULT_PROVIDER, ProviderId},
 };
 
 pub async fn handle_message(state: &AppState, headers: &HeaderMap, message: Value) -> Value {
@@ -115,24 +116,30 @@ async fn call_tool(
         "search_markets" => {
             let args: SearchMarketsPayload =
                 parse_params(params.arguments, "Invalid market search arguments")?;
-            let markets = state.polymarket_client.fetch_markets(&args.into()).await?;
+            let provider = args.provider;
+            let markets = state
+                .providers
+                .fetch_markets(provider, &args.into())
+                .await?;
             Ok(tool_result(json!({ "markets": markets })))
         }
         "get_market" => {
             let args: MarketIdPayload = parse_params(params.arguments, "Invalid market arguments")?;
             let market = state
-                .polymarket_client
-                .fetch_market(&args.market_id)
+                .providers
+                .fetch_market(args.provider, &args.market_id)
                 .await?;
-            Ok(tool_result(json!({ "market": market })))
+            Ok(tool_result(
+                json!({ "provider": args.provider, "market": market }),
+            ))
         }
         "analyze_market" => {
             let args: MarketIdPayload =
                 parse_params(params.arguments, "Invalid market analysis arguments")?;
-            let provider = AutomationProvider::default();
+            let provider = args.provider;
             let market = state
-                .polymarket_client
-                .fetch_market(&args.market_id)
+                .providers
+                .fetch_market(provider, &args.market_id)
                 .await?;
             Ok(tool_result(market_analysis(provider, market)))
         }
@@ -212,12 +219,12 @@ async fn call_tool(
 }
 
 fn resources_list_result() -> Value {
-    let provider = AutomationProvider::default();
+    let provider = DEFAULT_PROVIDER;
 
     json!({
         "resources": [
             {
-                "uri": format!("markets://{}", provider.venue_id()),
+                "uri": format!("markets://{}", provider.route_value()),
                 "name": format!("{} markets", provider.label()),
                 "mimeType": "application/json"
             },
@@ -241,12 +248,18 @@ async fn read_resource(
     params: Value,
 ) -> Result<Value, AppError> {
     let params: ResourceReadParams = parse_params(params, "Invalid resource read params")?;
-    let provider = AutomationProvider::default();
-    let market_prefix = format!("market://{}/", provider.venue_id());
-
-    if let Some(market_id) = params.uri.strip_prefix(&market_prefix) {
-        let market = state.polymarket_client.fetch_market(market_id).await?;
-        return Ok(resource_result(&params.uri, json!({ "market": market })));
+    if let Some(resource) = params.uri.strip_prefix("market://") {
+        let (provider, market_id) = resource
+            .split_once('/')
+            .ok_or_else(|| AppError::BadRequest("MCP market resource URI is invalid".to_owned()))?;
+        let provider = provider
+            .parse::<ProviderId>()
+            .map_err(|message| AppError::BadRequest(message.to_owned()))?;
+        let market = state.providers.fetch_market(provider, market_id).await?;
+        return Ok(resource_result(
+            &params.uri,
+            json!({ "provider": provider, "market": market }),
+        ));
     }
 
     if params.uri == "automations://list" {
@@ -362,12 +375,12 @@ async fn prepare_trade_action(
         ));
     }
 
-    let provider = AutomationProvider::default();
+    let provider = args.provider;
     let provider_ready = has_ready_provider_connection(state, user_id, provider).await?;
 
     Ok(tool_result(json!({
         "provider": provider,
-        "venue": provider.venue_id(),
+        "venue": provider.route_value(),
         "market": args.market,
         "action": args.action,
         "params": {
@@ -712,11 +725,11 @@ fn tool_label(tool: &str) -> &'static str {
 async fn has_ready_provider_connection(
     state: &AppState,
     user_id: &str,
-    provider: AutomationProvider,
+    provider: ProviderId,
 ) -> Result<bool, AppError> {
     let connection = venue_connection::Entity::find()
         .filter(venue_connection::Column::UserId.eq(user_id))
-        .filter(venue_connection::Column::Venue.eq(provider.venue_id()))
+        .filter(venue_connection::Column::Provider.eq(provider.storage_value()))
         .filter(venue_connection::Column::Enabled.eq(true))
         .filter(venue_connection::Column::Status.eq("active"))
         .one(&state.db)
@@ -727,8 +740,8 @@ async fn has_ready_provider_connection(
 
 fn publish_request(payload: AutomationToolPayload) -> PublishAutomationRequest {
     PublishAutomationRequest {
+        provider: payload.provider,
         market: payload.market,
-        provider: AutomationProvider::default(),
         title: payload.title,
         workflow: payload.workflow,
     }
@@ -737,8 +750,8 @@ fn publish_request(payload: AutomationToolPayload) -> PublishAutomationRequest {
 fn test_run_request(payload: TestRunAutomationToolPayload) -> TestRunAutomationRequest {
     TestRunAutomationRequest {
         automation_id: payload.automation_id,
+        provider: payload.provider,
         market: payload.market,
-        provider: AutomationProvider::default(),
         title: payload.title,
         workflow: payload.workflow,
     }
@@ -747,6 +760,7 @@ fn test_run_request(payload: TestRunAutomationToolPayload) -> TestRunAutomationR
 impl From<UpdateAutomationToolPayload> for AutomationToolPayload {
     fn from(payload: UpdateAutomationToolPayload) -> Self {
         Self {
+            provider: payload.provider,
             market: payload.market,
             title: payload.title,
             workflow: payload.workflow,
@@ -754,22 +768,26 @@ impl From<UpdateAutomationToolPayload> for AutomationToolPayload {
     }
 }
 
-fn market_analysis(provider: AutomationProvider, market: Value) -> Value {
+fn market_analysis(provider: ProviderId, market: MarketResponse) -> Value {
+    let outcome_prices = market
+        .outcomes
+        .iter()
+        .map(|outcome| outcome.price)
+        .collect::<Vec<_>>();
+
     json!({
         "provider": provider,
-        "venue": provider.venue_id(),
+        "venue": provider.route_value(),
         "venue_label": provider.label(),
-        "title": first_text(&market, &["question", "title"]),
-        "description": first_text(&market, &["description"]),
-        "outcomes": market_value(&market, "outcomes"),
-        "outcome_prices": market_value(&market, "outcomePrices"),
-        "volume": market_value(&market, "volume"),
-        "volume_num": market_value(&market, "volumeNum"),
-        "liquidity": market_value(&market, "liquidity"),
-        "last_trade_price": market_value(&market, "lastTradePrice"),
-        "best_bid": market_value(&market, "bestBid"),
-        "best_ask": market_value(&market, "bestAsk"),
-        "one_day_price_change": market_value(&market, "oneDayPriceChange"),
+        "title": market.title,
+        "description": market.description,
+        "outcomes": market.outcomes,
+        "outcome_prices": outcome_prices,
+        "volume": market.volume,
+        "liquidity": market.liquidity,
+        "last_trade_price": market.last_trade_price,
+        "best_bid": market.best_bid,
+        "best_ask": market.best_ask,
         "automation_ideas": [
             "Watch price movement and notify when conditions match.",
             "Add a price threshold condition before any buy or sell action.",
@@ -780,22 +798,7 @@ fn market_analysis(provider: AutomationProvider, market: Value) -> Value {
             "Trade actions require a connected venue account and user-reviewed workflow settings.",
             "This analysis is based on market data only and is not financial advice."
         ],
-        "raw_market": market
-    })
-}
-
-fn market_value(market: &Value, key: &str) -> Value {
-    market.get(key).cloned().unwrap_or(Value::Null)
-}
-
-fn first_text(market: &Value, keys: &[&str]) -> Option<String> {
-    keys.iter().find_map(|key| {
-        market
-            .get(*key)
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(str::to_owned)
+        "market": market
     })
 }
 
@@ -835,8 +838,10 @@ fn empty_schema() -> Value {
 fn search_markets_schema() -> Value {
     json!({
         "type": "object",
+        "required": ["provider"],
         "additionalProperties": false,
         "properties": {
+            "provider": provider_schema(),
             "id": { "type": "string" },
             "slug": { "type": "string" },
             "limit": { "type": "integer", "minimum": 1, "maximum": 100 },
@@ -851,9 +856,10 @@ fn search_markets_schema() -> Value {
 fn market_id_schema() -> Value {
     json!({
         "type": "object",
-        "required": ["market_id"],
+        "required": ["provider", "market_id"],
         "additionalProperties": false,
         "properties": {
+            "provider": provider_schema(),
             "market_id": { "type": "string" }
         }
     })
@@ -873,9 +879,10 @@ fn automation_id_schema() -> Value {
 fn automation_payload_schema() -> Value {
     json!({
         "type": "object",
-        "required": ["title", "market", "workflow"],
+        "required": ["provider", "title", "market", "workflow"],
         "additionalProperties": false,
         "properties": {
+            "provider": provider_schema(),
             "title": { "type": "string" },
             "market": market_schema(),
             "workflow": workflow_schema()
@@ -886,10 +893,11 @@ fn automation_payload_schema() -> Value {
 fn update_automation_payload_schema() -> Value {
     json!({
         "type": "object",
-        "required": ["automation_id", "title", "market", "workflow"],
+        "required": ["automation_id", "provider", "title", "market", "workflow"],
         "additionalProperties": false,
         "properties": {
             "automation_id": { "type": "string" },
+            "provider": provider_schema(),
             "title": { "type": "string" },
             "market": market_schema(),
             "workflow": workflow_schema()
@@ -900,10 +908,11 @@ fn update_automation_payload_schema() -> Value {
 fn test_run_payload_schema() -> Value {
     json!({
         "type": "object",
-        "required": ["title", "market", "workflow"],
+        "required": ["provider", "title", "market", "workflow"],
         "additionalProperties": false,
         "properties": {
             "automation_id": { "type": "string" },
+            "provider": provider_schema(),
             "title": { "type": "string" },
             "market": market_schema(),
             "workflow": workflow_schema()
@@ -914,9 +923,10 @@ fn test_run_payload_schema() -> Value {
 fn prepare_trade_action_schema() -> Value {
     json!({
         "type": "object",
-        "required": ["market", "action", "outcome", "order_type", "amount"],
+        "required": ["provider", "market", "action", "outcome", "order_type", "amount"],
         "additionalProperties": false,
         "properties": {
+            "provider": provider_schema(),
             "market": market_schema(),
             "action": { "type": "string", "enum": [WorkflowActionType::Buy, WorkflowActionType::Sell] },
             "outcome": { "type": "string", "enum": ["YES", "NO"] },
@@ -924,6 +934,10 @@ fn prepare_trade_action_schema() -> Value {
             "amount": { "type": "number", "exclusiveMinimum": 0 }
         }
     })
+}
+
+fn provider_schema() -> Value {
+    json!({ "type": "string", "enum": ["POLYMARKET"] })
 }
 
 fn market_schema() -> Value {
@@ -1021,7 +1035,7 @@ fn jsonrpc_error(id: Option<Value>, code: i64, message: impl Into<String>) -> Va
 fn app_error_response(id: Option<Value>, error: AppError) -> Value {
     let code = match error {
         AppError::Unauthorized => -32001,
-        AppError::BadRequest(_) => -32602,
+        AppError::BadRequest(_) | AppError::ProviderValidation { .. } => -32602,
         AppError::Conflict(_) => -32009,
         AppError::NotFound(_) => -32004,
         AppError::ExternalApiError(_) => -32052,

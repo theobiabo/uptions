@@ -8,6 +8,7 @@ use uptions_backend::{
     db,
     entities::user,
     load_env,
+    providers::types::DEFAULT_PROVIDER,
 };
 use uuid::Uuid;
 
@@ -34,6 +35,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut active = existing.into_active_model();
         active.password_hash = Set(Some(password_hash));
         active.email_verified_at = Set(Some(now));
+        active.preferred_trading_provider = Set(DEFAULT_PROVIDER.storage_value().to_owned());
         active.updated_at = Set(now);
         active.update(&db).await?;
 
@@ -44,6 +46,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             email: Set(Some(email.clone())),
             password_hash: Set(Some(password_hash)),
             email_verified_at: Set(Some(now)),
+            preferred_trading_provider: Set(DEFAULT_PROVIDER.storage_value().to_owned()),
             ..Default::default()
         }
         .insert(&db)
